@@ -38,6 +38,16 @@ from pipeline.ingestion.noaa_swpc_live import (
     SolarWindSnapshot,
 )
 
+# PRADAN credentials check (optional — ISRO Aditya-L1 data)
+_PRADAN_AVAILABLE = bool(os.environ.get("PRADAN_USER") and os.environ.get("PRADAN_PASS"))
+if _PRADAN_AVAILABLE:
+    from pipeline.ingestion.pradan_downloader import (
+        fetch_all_aditya_data,
+        SoLEXSReading,
+        HEL1OSReading,
+        solexs_counts_to_flux_proxy,
+    )
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -70,11 +80,21 @@ class AppState:
     swis_available: bool = False
     suit_available: bool = False
     goes_rt_available: bool = True
+    # Latest Aditya-L1 readings
+    solexs_reading: Optional[object] = None   # SoLEXSReading
+    helios_reading: Optional[object] = None   # HEL1OSReading
+    solexs_last_update: float = 0.0
+    helios_last_update: float = 0.0
+    # Aditya-L1 ring buffer (most recent 1800 1-s samples = 30 min)
+    solexs_ring: list[dict] = []
+    helios_ring: list[dict] = []
 
 state = AppState()
 
-POLL_INTERVAL_S = 60  # NOAA SWPC updates at 1-min cadence
-RING_MAX = 360        # 6 hours at 1-min cadence
+POLL_INTERVAL_S         = 60      # NOAA SWPC updates at 1-min cadence
+RING_MAX                = 360     # 6 hours at 1-min cadence
+PRADAN_POLL_INTERVAL_S  = 900     # PRADAN: poll every 15 minutes (daily files)
+SOLEXS_RING_MAX         = 1800    # 30 minutes of 1-s SoLEXS data
 
 
 def _flux_to_mode(flux: float, z: float) -> str:
@@ -157,6 +177,76 @@ async def _noaa_poller() -> None:
         await asyncio.sleep(POLL_INTERVAL_S)
 
 
+async def _pradan_poller() -> None:
+    """
+    Background task: downloads latest SoLEXS + HEL1OS data from ISRO PRADAN.
+    Runs every PRADAN_POLL_INTERVAL_S (15 min) — files are updated daily.
+    Only active when PRADAN_USER + PRADAN_PASS env vars are set.
+    """
+    if not _PRADAN_AVAILABLE:
+        logger.info("PRADAN credentials not set — SoLEXS/HEL1OS will remain OFFLINE")
+        return
+
+    logger.info("PRADAN poller starting (interval=%ds)", PRADAN_POLL_INTERVAL_S)
+    while True:
+        try:
+            result = await fetch_all_aditya_data()
+
+            # ── SoLEXS ───────────────────────────────────────────────────────
+            solexs = result.get("solexs")
+            if solexs is not None:
+                state.solexs_reading = solexs
+                state.solexs_available = True
+                state.solexs_last_update = solexs.fetched_at
+
+                # Build 1-s ring buffer (last SOLEXS_RING_MAX points)
+                new_points = [
+                    {"t": int(t * 1000), "counts_sdd2": float(c)}
+                    for t, c in zip(solexs.times_unix[-SOLEXS_RING_MAX:],
+                                    solexs.counts_sdd2[-SOLEXS_RING_MAX:])
+                ]
+                state.solexs_ring = new_points
+                logger.info(
+                    "SoLEXS updated: %s, %d samples, last=%.1f cts/s",
+                    solexs.date_str, len(solexs.times_unix),
+                    float(solexs.counts_sdd2[-1]) if len(solexs.counts_sdd2) > 0 else 0.0,
+                )
+            else:
+                logger.warning("SoLEXS data not available from PRADAN")
+
+            # ── HEL1OS ───────────────────────────────────────────────────────
+            helios = result.get("helios")
+            if helios is not None:
+                state.helios_reading = helios
+                state.hel1os_available = True
+                state.helios_last_update = helios.fetched_at
+
+                # Build HEL1OS ring buffer with key HOPE bands
+                n = len(helios.times_unix)
+                new_pts = [
+                    {
+                        "t": int(helios.times_unix[i] * 1000),
+                        "cdte_30_40": float(helios.cdte1_30_40[i]),
+                        "cdte_40_60": float(helios.cdte1_40_60[i]),
+                        "czt_40_60":  float(helios.czt1_40_60[i]),
+                        "czt_60_80":  float(helios.czt1_60_80[i]),
+                    }
+                    for i in range(max(0, n - SOLEXS_RING_MAX), n)
+                ]
+                state.helios_ring = new_pts
+                logger.info(
+                    "HEL1OS updated: %s, %d samples",
+                    helios.obs_start, len(helios.times_unix),
+                )
+            else:
+                logger.warning("HEL1OS data not available from PRADAN")
+
+        except Exception as exc:
+            logger.error("PRADAN poller error: %s", exc, exc_info=True)
+
+        await asyncio.sleep(PRADAN_POLL_INTERVAL_S)
+
+
 async def _ws_broadcast() -> None:
     """Push current state to all connected WebSocket clients."""
     if not state.active_websockets or not state.nowcast_result:
@@ -236,9 +326,11 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Initial poll failed: %s — serving empty state", exc)
 
-    poller_task = asyncio.create_task(_noaa_poller())
+    noaa_task   = asyncio.create_task(_noaa_poller())
+    pradan_task = asyncio.create_task(_pradan_poller())
     yield
-    poller_task.cancel()
+    noaa_task.cancel()
+    pradan_task.cancel()
     logger.info("AdityScan v3 API shutdown.")
 
 
@@ -418,14 +510,14 @@ async def get_status():
     satellites = [
         SatelliteStatus(name="Aditya-L1", instrument="SoLEXS", agency="ISRO",
             available=state.solexs_available,
-            last_data_unix=state.last_update_unix if state.solexs_available else None,
+            last_data_unix=state.solexs_last_update if state.solexs_available else None,
             data_quality="GOOD" if state.solexs_available else "UNAVAILABLE",
-            description="Solar Low Energy X-ray Spectrometer, 2.8–12 keV, 1-s cadence"),
+            description="Solar Low Energy X-ray Spectrometer, 2–22 keV, 1-s cadence"),
         SatelliteStatus(name="Aditya-L1", instrument="HEL1OS", agency="ISRO",
             available=state.hel1os_available,
-            last_data_unix=state.last_update_unix if state.hel1os_available else None,
+            last_data_unix=state.helios_last_update if state.hel1os_available else None,
             data_quality="GOOD" if state.hel1os_available else "UNAVAILABLE",
-            description="High Energy L1 X-ray Spectrometer, 5–150 keV, 1-s cadence"),
+            description="High Energy L1 X-ray Spectrometer, 5–150 keV CdTe+CZT, 1-s cadence"),
         SatelliteStatus(name="Aditya-L1", instrument="MAG", agency="ISRO",
             available=state.mag_available,
             last_data_unix=state.last_update_unix if state.mag_available else None,
@@ -460,6 +552,52 @@ async def get_status():
         last_update_unix=state.last_update_unix,
         satellites=satellites,
     )
+
+
+# ── Aditya-L1 instrument endpoints ───────────────────────────────────────────
+
+@app.get("/api/solexs")
+async def get_solexs(minutes: int = 30):
+    """
+    SoLEXS SDD2 light curve — last N minutes at 1-s cadence.
+    Returns count rates in 2-22 keV. Available when PRADAN is configured.
+    """
+    if not state.solexs_available or not state.solexs_ring:
+        raise HTTPException(503, "SoLEXS data not yet available — PRADAN download pending")
+    cutoff = (time.time() - minutes * 60) * 1000
+    points = [p for p in state.solexs_ring if p["t"] >= cutoff]
+    last_counts = state.solexs_ring[-1]["counts_sdd2"] if state.solexs_ring else 0.0
+    return {
+        "points": points[-min(len(points), 3600):],
+        "current_counts_sdd2": round(last_counts, 2),
+        "date_str": state.solexs_reading.date_str if state.solexs_reading else None,
+        "last_update_unix": state.solexs_last_update,
+        "source": "isro_pradan_l1",
+    }
+
+
+@app.get("/api/helios")
+async def get_helios(minutes: int = 30):
+    """
+    HEL1OS light curve — HOPE trigger bands (CdTe 30-40 keV, CZT 40-60 keV).
+    Available when PRADAN is configured.
+    """
+    if not state.hel1os_available or not state.helios_ring:
+        raise HTTPException(503, "HEL1OS data not yet available — PRADAN download pending")
+    cutoff = (time.time() - minutes * 60) * 1000
+    points = [p for p in state.helios_ring if p["t"] >= cutoff]
+    return {
+        "points": points[-min(len(points), 3600):],
+        "obs_start": state.helios_reading.obs_start if state.helios_reading else None,
+        "last_update_unix": state.helios_last_update,
+        "source": "isro_pradan_l1",
+        "bands": {
+            "cdte_30_40_kev": "CdTe 30-40 keV (HOPE trigger band 1)",
+            "cdte_40_60_kev": "CdTe 40-60 keV (HOPE trigger band 2)",
+            "czt_40_60_kev":  "CZT 40-60 keV (hard X-ray)",
+            "czt_60_80_kev":  "CZT 60-80 keV (very hard X-ray)",
+        },
+    }
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
