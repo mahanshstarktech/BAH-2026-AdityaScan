@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      postgres:
+        image: timescale/timescaledb:latest-pg15
+        env:
+          POSTGRES_DB: adityscan_test
+          POSTGRES_USER: adityscan
+          POSTGRES_PASSWORD: testpass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r adityscan/requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+
+      - name: Apply DB schema
+        run: |
+          psql postgresql://adityscan:testpass@localhost:5432/adityscan_test \
+            -f adityscan/backend/models/db_schema.sql
+        env:
+          PGPASSWORD: testpass
+
+      - name: Run tests
+        run: |
+          cd adityscan
+          pytest tests/ -v --cov=backend --cov-report=xml
+        env:
+          DATABASE_URL: postgresql://adityscan:testpass@localhost:5432/adityscan_test
+          REDIS_URL: redis://localhost:6379/0
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: adityscan/coverage.xml

@@ -1,0 +1,129 @@
+version: "3.9"
+
+services:
+  # ── TimescaleDB ────────────────────────────────────────────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: adityscan
+      POSTGRES_USER: adityscan
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ../backend/models/db_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adityscan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (Celery broker + WebSocket state) ────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://adityscan:${DB_PASSWORD}@db:5432/adityscan
+      - REDIS_URL=redis://redis:6379/0
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://adityscan.pages.dev}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - fits_data:/data/fits
+      - model_artifacts:/data/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Celery Worker (triage + spectral fitting + ML inference) ───────────────
+  worker:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.backend
+    restart: unless-stopped
+    command: celery -A backend.workers.orchestrator worker
+             --loglevel=info
+             --concurrency=4
+             -Q triage,spectral,ml,ingest
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://adityscan:${DB_PASSWORD}@db:5432/adityscan
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - fits_data:/data/fits
+      - model_artifacts:/data/models
+
+  # ── Celery Beat (scheduler — kicks off daily ingestion, etc.) ─────────────
+  beat:
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile.backend
+    restart: unless-stopped
+    command: celery -A backend.workers.orchestrator beat --loglevel=info
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://adityscan:${DB_PASSWORD}@db:5432/adityscan
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+
+  # ── Prometheus (metrics scraping) ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+
+  # ── Grafana (dashboard for operators) ─────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  timescale_data:
+  redis_data:
+  fits_data:
+  model_artifacts:
+  prometheus_data:
+  grafana_data:

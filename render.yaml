@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: adityscan-api
+    runtime: python
+    repo: https://github.com/mahanshstarktech/adityscan-dashboard
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.pipeline.api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CORS_ORIGINS
+        value: https://adityscan.pages.dev,https://adityscan-dashboard.pages.dev
+      - key: PYTHONPATH
+        value: backend
+    autoDeploy: true
+    healthCheckPath: /health

@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.env.local
+.env.production
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Frontend
+frontend/node_modules/
+frontend/.bun/
+frontend/dist/
+
+# Data
+data/
+*.fits
+*.cdf
+*.nc
+
+# Models
+models/*.pt
+models/*.onnx
+models/*.pkl
+
+# Logs
+*.log
+.DS_Store
+.pytest_cache/

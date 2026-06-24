@@ -1,0 +1,60 @@
+name: Deploy AdityScan v3
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # ── Frontend: Cloudflare Pages ──────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy Frontend → Cloudflare Pages
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build production bundle
+        run: bun run build
+        env:
+          VITE_API_BASE_URL: https://adityscan-api.onrender.com
+          VITE_WS_URL: wss://adityscan-api.onrender.com/ws/live
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: adityscan-dashboard
+          directory: frontend/dist
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Backend: Render.com (auto-deploys from render.yaml on push) ─────────────
+  # Render watches this repo and auto-deploys when render.yaml is present.
+  # No extra steps needed — just push to main.
+
+  # ── Run tests before deploy ─────────────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest pytest-asyncio numpy scipy
+
+      - name: Run tests
+        run: PYTHONPATH=backend python -m pytest tests/ -v --tb=short
