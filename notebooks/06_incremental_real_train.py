@@ -28,6 +28,16 @@ DATA SOURCES USED (ALL modalities, as promised):
     ✅ SUIT UV images — 200-400nm, 1 image per day (from PRADAN)
     ✅ SDO AIA 304Å  — active region detection (from JSOC)
 
+GOLDEN-WINDOW MODE:
+-------------------------------------------------------
+  For manually uploaded May 10-20 data, run with:
+    --months 2024-05 --skip-download --start-date 2024-05-10 --end-date 2024-05-20
+    --required-modalities solexs,helios,mag,goes --no-sharp --no-suit --no-swis
+
+  This trains the lean architecture used for the current experiment:
+    SoLEXS + HEL1OS X-ray TCN, MAG in-situ context, GOES labels.
+    SWIS, SUIT, and SHARP are excluded from training and reported as future scope.
+
 WAVELET TRANSFORM (Quasi-Periodic Pulsation detection):
 -------------------------------------------------------
     ✅ Continuous Wavelet Transform applied to SoLEXS light curves
@@ -67,6 +77,8 @@ USAGE (your friend just runs):
   --skip-download              Use already-downloaded data in data/pradan_cache/
   --quick-test                 Test 3 days only (verify setup works)
   --no-suit                    Skip SUIT image branch (faster, less disk)
+  --validate-only              Build month features/reports, then exit before training
+  --require-all-modalities     Fail validation if any required modality is missing/zero
 """
 
 from __future__ import annotations
@@ -102,7 +114,7 @@ from pipeline.ingestion.aspex_swis_loader import SWISLoader
 from pipeline.ingestion.suit_loader import SUITLoader
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-LOG_FILE = ROOT / "train.log"
+LOG_FILE = ROOT / "training.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -122,6 +134,116 @@ MODELS_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 GOES_DIR.mkdir(parents=True, exist_ok=True)
 SHARP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+DEFAULT_REQUIRED_MODALITIES = ("solexs", "helios", "mag", "goes")
+
+
+def _nonzero_fraction(arr: np.ndarray) -> float:
+    if arr.size == 0:
+        return 0.0
+    return float(np.count_nonzero(np.nan_to_num(arr)) / arr.size)
+
+
+def _modality_status(name: str, records: int, aligned_nonzero_fraction: float, detail: str = "") -> dict:
+    return {
+        "name": name,
+        "records": int(records),
+        "aligned_nonzero_fraction": round(float(aligned_nonzero_fraction), 6),
+        "passed": bool(records > 0 and aligned_nonzero_fraction > 0.0),
+        "detail": detail,
+    }
+
+
+def _write_month_report(year_month: str, report: dict) -> Path:
+    report_dir = MODELS_DIR / "month_reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / f"{year_month}_validation.json"
+    with path.open("w") as f:
+        json.dump(report, f, indent=2, sort_keys=True)
+    logger.info("Month validation report written: %s", path)
+    return path
+
+
+def _required_modalities(args) -> tuple[str, ...]:
+    raw = getattr(args, "required_modalities", "") or ",".join(DEFAULT_REQUIRED_MODALITIES)
+    return tuple(m.strip().lower() for m in raw.split(",") if m.strip())
+
+
+def _architecture_metadata(args) -> dict:
+    used = [
+        "Aditya-L1 SoLEXS L1 soft X-ray count-rate features",
+        "Aditya-L1 HEL1OS L1 hard X-ray CdTe/CZT band features",
+        "Aditya-L1 MAG L2 in-situ magnetic context",
+        "GOES-18 XRS labels / label cross-validation",
+        "Derived CWT QPP, Neupert, HXR/SXR, HXR spectral-index, and MAG geometry features",
+    ]
+    future_scope = []
+    if getattr(args, "no_swis", False):
+        future_scope.append("ASPEX-SWIS solar-wind plasma features")
+    if getattr(args, "no_suit", False):
+        future_scope.append("SUIT UV image CNN branch")
+    if getattr(args, "no_sharp", False):
+        future_scope.append("SDO/HMI SHARP magnetic-complexity LSTM and GNN branch")
+
+    enabled_branches = [
+        "SoLEXS+HEL1OS causal TCN over 30-minute, 22-feature X-ray/physics windows",
+        "MAG-only in-situ MLP using 8 MAG features plus zero-padded SWIS slots",
+    ]
+    if not getattr(args, "no_sharp", False):
+        enabled_branches.append("SHARP BiLSTM / GNN magnetic-context branch")
+    if not getattr(args, "no_suit", False):
+        enabled_branches.append("SUIT image CNN branch")
+
+    return {
+        "experiment": "golden_window_lean" if future_scope else "full_multimodal",
+        "window": {
+            "start_date": getattr(args, "start_date", "") or "month-start",
+            "end_date": getattr(args, "end_date", "") or "month-end",
+        },
+        "required_modalities": list(_required_modalities(args)),
+        "enabled_branches": enabled_branches,
+        "used_data_sources": used,
+        "future_scope_data_sources": future_scope,
+        "fusion": "Cross-modal attention with missing branches passed as learned zero-context slots",
+        "n_seq_features": 22,
+        "n_insitu_features": 14,
+        "n_sharp_features": 21,
+        "window_seconds": 1800,
+    }
+
+
+def _month_bounds(year: str, month: str, args) -> tuple[datetime, datetime]:
+    start_dt = datetime(int(year), int(month), 1)
+    if int(month) == 12:
+        end_dt = datetime(int(year) + 1, 1, 1)
+    else:
+        end_dt = datetime(int(year), int(month) + 1, 1)
+
+    if getattr(args, "start_date", ""):
+        start_dt = max(start_dt, datetime.strptime(args.start_date, "%Y-%m-%d"))
+    if getattr(args, "end_date", ""):
+        end_dt = min(end_dt, datetime.strptime(args.end_date, "%Y-%m-%d") + timedelta(days=1))
+    if start_dt >= end_dt:
+        raise ValueError(f"Invalid date window: {start_dt.date()} to {end_dt.date()}")
+    return start_dt, end_dt
+
+
+def _limit_training_windows(ds_info: dict, args, year_month: str) -> None:
+    max_windows = int(getattr(args, "max_train_windows", 0) or 0)
+    if max_windows <= 0:
+        return
+    valid_indices = ds_info.get("valid_indices")
+    if valid_indices is None or len(valid_indices) <= max_windows:
+        return
+    positions = np.linspace(0, len(valid_indices) - 1, max_windows, dtype=np.int32)
+    ds_info["valid_indices"] = valid_indices[positions]
+    logger.info(
+        "%s bounded CPU training: using %d/%d windows",
+        year_month,
+        len(ds_info["valid_indices"]),
+        len(valid_indices),
+    )
 
 # ── Training months in priority order ──────────────────────────────────────────
 # These are ordered by SCIENTIFIC VALUE (biggest flare events first)
@@ -159,7 +281,13 @@ def get_device() -> torch.device:
         logger.info("✅ CUDA GPU: %s", torch.cuda.get_device_name(0))
     else:
         device = torch.device("cpu")
-        logger.warning("⚠️  CPU only — training will be slow")
+        logger.warning(
+            "⚠️  CPU only — training will be slow "
+            "(mps_built=%s, mps_available=%s, torch=%s)",
+            torch.backends.mps.is_built(),
+            torch.backends.mps.is_available(),
+            torch.__version__,
+        )
     return device
 
 
@@ -539,6 +667,7 @@ def load_month_features(
     mag_dir    = month_dir / "mag"
     swis_dir   = month_dir / "swis"
     suit_dir   = month_dir / "suit"
+    modality_report: dict[str, dict] = {}
 
     WINDOW_S = 1800     # 30 minutes at 1-s cadence
     HORIZON_S = 900     # predict M+ in next 15 minutes
@@ -549,12 +678,10 @@ def load_month_features(
     slx_counts = []
     slx_loader = SoLEXSLoader(str(solexs_dir))
 
-    # Scan all days in the month
-    start_dt = datetime(int(year), int(month), 1)
-    if int(month) == 12:
-        end_dt = datetime(int(year) + 1, 1, 1)
-    else:
-        end_dt = datetime(int(year), int(month) + 1, 1)
+    # Scan the configured training window inside the month.
+    start_dt, end_dt = _month_bounds(year, month, args)
+    logger.info("%s training window: %s through %s",
+                year_month, start_dt.date(), (end_dt - timedelta(days=1)).date())
 
     current = start_dt
     while current < end_dt:
@@ -579,11 +706,15 @@ def load_month_features(
     slx_times  = slx_times[idx_sort]
     slx_counts = slx_counts[idx_sort]
     logger.info("%s SoLEXS: %d records (%.1f hours)", year_month, len(slx_times), len(slx_times) / 3600)
+    modality_report["solexs"] = _modality_status(
+        "solexs", len(slx_times), _nonzero_fraction(slx_counts), "SoLEXS SDD2 count-rate samples"
+    )
 
     # ── Load GOES XRS for flare labels (cross-validation) ───────────────────
     # sunpy downloads netCDF (.nc) files — we read them with netCDF4
     goes_flux = None
     goes_times = None
+    goes_file_count = 0
     try:
         import netCDF4 as nc_goes
         # Find all 1-minute average GOES files for this month
@@ -592,6 +723,7 @@ def load_month_features(
             # Try 1-second flux files as fallback
             nc_files = sorted(goes_dir.glob(f"*flx1s*_g18_d{year}{month}*_*.nc"))
         if nc_files:
+            goes_file_count = len(nc_files)
             all_times = []
             all_flux = []
             for ncf in nc_files:
@@ -626,6 +758,7 @@ def load_month_features(
                 goes_flux = np.array(all_flux, dtype=np.float64)
                 # Remove NaN/invalid values
                 valid = np.isfinite(goes_flux) & (goes_flux > 0)
+                valid &= (goes_times >= start_dt.timestamp()) & (goes_times < end_dt.timestamp())
                 goes_times = goes_times[valid]
                 goes_flux = goes_flux[valid]
                 logger.info("%s GOES: %d records from %d nc files", year_month, len(goes_times), len(nc_files))
@@ -637,6 +770,12 @@ def load_month_features(
         logger.warning("netCDF4 not installed — GOES data skipped")
     except Exception as exc:
         logger.warning("GOES load error: %s", exc)
+    modality_report["goes"] = _modality_status(
+        "goes",
+        0 if goes_times is None else len(goes_times),
+        0.0 if goes_flux is None else _nonzero_fraction(goes_flux),
+        f"{goes_file_count} GOES netCDF files",
+    )
 
     # ── Load HEL1OS (primary) ────────────────────────────────────────────────
     hel_bands   = {band: [] for band in [
@@ -676,6 +815,10 @@ def load_month_features(
     else:
         hel_aligned = {band: np.zeros_like(slx_counts) for band in hel_bands}
         logger.warning("%s HEL1OS not available — using zeros", year_month)
+    helios_nonzero = max(_nonzero_fraction(arr) for arr in hel_aligned.values())
+    modality_report["helios"] = _modality_status(
+        "helios", len(hel_times), helios_nonzero, "HEL1OS CdTe/CZT hard X-ray bands aligned to SoLEXS"
+    )
 
     # ── Load MAG (supplementary — solar wind magnetic field) ─────────────────
     mag_features = np.zeros((len(slx_times), 8), dtype=np.float32)
@@ -702,22 +845,40 @@ def load_month_features(
                 # Interpolate to full SoLEXS grid (MAG is 10-s cadence)
                 end_i = min(i + 600, len(slx_times))
                 mag_features[i:end_i] = feat[np.newaxis, :]
+    modality_report["mag"] = _modality_status(
+        "mag", len(mag_all_records), _nonzero_fraction(mag_features), "MAG L2 in-situ magnetic features"
+    )
 
     # ── Load ASPEX-SWIS (supplementary — solar wind particles) ───────────────
     swis_features = np.zeros((len(slx_times), 6), dtype=np.float32)
     swis_loader   = SWISLoader(str(swis_dir))
     current = start_dt
     swis_all_records = []
-    while current < end_dt:
-        try:
-            recs = swis_loader.load_bulk_params(current.strftime("%Y%m%d"))
-            swis_all_records.extend(recs)
-        except Exception:
-            pass
-        current += timedelta(days=1)
+    if getattr(args, "no_swis", False):
+        logger.info("%s SWIS disabled for this run", year_month)
+    else:
+        while current < end_dt:
+            try:
+                recs = swis_loader.load_bulk_params(current.strftime("%Y%m%d"))
+                swis_all_records.extend(recs)
+            except Exception:
+                pass
+            current += timedelta(days=1)
 
     if swis_all_records:
         logger.info("%s SWIS: %d records", year_month, len(swis_all_records))
+        for i in range(0, len(slx_times), 600):
+            feat = swis_loader.extract_ml_features(
+                swis_all_records,
+                window_end_unix=slx_times[i],
+                window_minutes=30.0,
+            )
+            if feat is not None:
+                end_i = min(i + 600, len(slx_times))
+                swis_features[i:end_i] = feat[np.newaxis, :]
+    modality_report["swis"] = _modality_status(
+        "swis", len(swis_all_records), _nonzero_fraction(swis_features), "ASPEX-SWIS L2 bulk solar wind features"
+    )
 
     # ── Engineering: SoLEXS derived features ─────────────────────────────────
     import pandas as pd
@@ -842,6 +1003,8 @@ def load_month_features(
     # SHARP: 21 magnetic complexity params at 12-min cadence
     # We project them onto the per-second SoLEXS time grid
     sharp_feat_full = np.zeros((N, 21), dtype=np.float32)
+    sharp_rows = 0
+    sharp_params = 0
     if sharp_file.exists() and sharp_file.stat().st_size > 5000:
         try:
             import pandas as pd
@@ -854,6 +1017,8 @@ def load_month_features(
                 "shrgt45", "area_acr", "r_value",
             ] if c in sh.columns]
             if sharp_cols and len(sh) > 0:
+                sharp_rows = len(sh)
+                sharp_params = len(sharp_cols)
                 t_rec_col = next((c for c in sh.columns if "t_rec" in c or "time" in c), None)
                 if t_rec_col:
                     sh["unix"] = pd.to_datetime(
@@ -870,22 +1035,38 @@ def load_month_features(
                                 year_month, len(sh), len(sharp_cols))
         except Exception as exc:
             logger.warning("%s SHARP load error: %s", year_month, exc)
+    modality_report["sharp"] = _modality_status(
+        "sharp",
+        sharp_rows,
+        _nonzero_fraction(sharp_feat_full),
+        f"{sharp_params} SHARP magnetic parameters aligned",
+    )
 
     # ── Load SUIT Images (if available) ──────────────────────────────────────
-    suit_loader = SUITLoader(str(suit_dir))
-    try:
-        suit_images_list = suit_loader.scan_directory()
-        logger.info("%s SUIT: %d images scanned", year_month, len(suit_images_list))
+    if getattr(args, "no_suit", False):
         suit_images_dict = {}
-        for img in suit_images_list:
-            suit_images_dict[img.unix_time] = img.load_array()
-    except Exception as exc:
-        logger.warning("%s SUIT load error: %s", year_month, exc)
-        suit_images_dict = {}
+        logger.info("%s SUIT disabled for this run", year_month)
+    else:
+        suit_loader = SUITLoader(str(suit_dir))
+        try:
+            suit_images_list = suit_loader.scan_directory()
+            logger.info("%s SUIT: %d images scanned", year_month, len(suit_images_list))
+            suit_images_dict = {}
+            for img in suit_images_list:
+                suit_images_dict[img.unix_time] = img.load_array()
+        except Exception as exc:
+            logger.warning("%s SUIT load error: %s", year_month, exc)
+            suit_images_dict = {}
 
     # Pre-sort SUIT images by timestamp for fast lookup
     suit_times = np.array(sorted(suit_images_dict.keys()), dtype=np.float64) if suit_images_dict else np.array([])
     suit_image_arrays = suit_images_dict
+    suit_nonzero = 0.0
+    if suit_image_arrays:
+        suit_nonzero = max(_nonzero_fraction(np.asarray(arr)) for arr in suit_image_arrays.values())
+    modality_report["suit"] = _modality_status(
+        "suit", len(suit_image_arrays), suit_nonzero, "SUIT UV image arrays loaded"
+    )
 
     # ── Identify valid window indices (Lazy Dataset prep) ────────────────────
     valid_indices = []
@@ -910,6 +1091,35 @@ def load_month_features(
         year_month, len(valid_indices), y_raw[valid_indices].mean() * 100
     )
 
+    month_report = {
+        "month": year_month,
+        "month_dir": str(month_dir),
+        "required_modalities": list(_required_modalities(args)),
+        "start_date": start_dt.date().isoformat(),
+        "end_date": (end_dt - timedelta(days=1)).date().isoformat(),
+        "goes_dir": str(goes_dir),
+        "sharp_file": str(sharp_file),
+        "n_timesteps": int(N),
+        "n_windows": int(len(valid_indices)),
+        "positive_window_rate": round(float(y_raw[valid_indices].mean()), 6),
+        "seq_feature_shape": list(seq_features.shape),
+        "modalities": modality_report,
+    }
+    failed_required = [
+        name for name in _required_modalities(args)
+        if not modality_report.get(name, {}).get("passed", False)
+    ]
+    month_report["failed_required_modalities"] = failed_required
+    _write_month_report(year_month, month_report)
+
+    if getattr(args, "require_all_modalities", False) and failed_required:
+        logger.error(
+            "%s strict validation failed. Missing/zero modalities: %s",
+            year_month,
+            ", ".join(failed_required),
+        )
+        return None
+
     # Return a dictionary containing the base arrays + valid indices
     return {
         "seq_features": seq_features,
@@ -921,6 +1131,10 @@ def load_month_features(
         "slx_times": slx_times,
         "y_raw": y_raw,
         "valid_indices": valid_indices,
+        "month_report": month_report,
+        "use_sharp": not getattr(args, "no_sharp", False),
+        "use_suit": not getattr(args, "no_suit", False),
+        "use_gnn": not getattr(args, "no_sharp", False),
     }
 
 
@@ -1248,7 +1462,12 @@ def train_one_month(
             gnn_batch = torch.arange(batch_size, device=device)
 
             optimizer.zero_grad()
-            out = model(X_s, X_sh, X_i, image=X_su, gnn_edge_index=gnn_edge_index, gnn_batch=gnn_batch)
+            sharp_arg = X_sh if ds_info.get("use_sharp", True) else None
+            image_arg = X_su if ds_info.get("use_suit", True) else None
+            gnn_ei_arg = gnn_edge_index if ds_info.get("use_gnn", True) else None
+            gnn_bt_arg = gnn_batch if ds_info.get("use_gnn", True) else None
+            out = model(X_s, sharp_arg, X_i, image=image_arg,
+                        gnn_edge_index=gnn_ei_arg, gnn_batch=gnn_bt_arg)
 
             # Primary: 15-min horizon
             loss = criterion(out["p_flare_15min"], y_b)
@@ -1280,7 +1499,12 @@ def train_one_month(
                 batch_size = X_s.size(0)
                 gnn_edge_index = torch.arange(batch_size, device=device).unsqueeze(0).repeat(2, 1)
                 gnn_batch = torch.arange(batch_size, device=device)
-                out = model(X_s.to(device), X_sh.to(device), X_i.to(device), image=X_su.to(device), gnn_edge_index=gnn_edge_index, gnn_batch=gnn_batch)
+                sharp_arg = X_sh.to(device) if ds_info.get("use_sharp", True) else None
+                image_arg = X_su.to(device) if ds_info.get("use_suit", True) else None
+                gnn_ei_arg = gnn_edge_index if ds_info.get("use_gnn", True) else None
+                gnn_bt_arg = gnn_batch if ds_info.get("use_gnn", True) else None
+                out = model(X_s.to(device), sharp_arg, X_i.to(device), image=image_arg,
+                            gnn_edge_index=gnn_ei_arg, gnn_batch=gnn_bt_arg)
                 p = out["p_flare_15min"].cpu().numpy()  # already sigmoid'd by ForecastHead
                 val_probs.extend(p.tolist() if p.ndim > 0 else [float(p)])
                 val_labels.extend(y_b.numpy().tolist())
@@ -1371,18 +1595,38 @@ def main():
                         help="Quick test: 3 days of data, 2 epochs only")
     parser.add_argument("--no-suit", action="store_true",
                         help="Skip SUIT image branch")
+    parser.add_argument("--no-sharp", action="store_true",
+                        help="Skip SHARP LSTM/GNN branches")
+    parser.add_argument("--no-swis", action="store_true",
+                        help="Skip SWIS bulk loading; in-situ branch uses MAG plus zero-padded SWIS slots")
+    parser.add_argument("--start-date", type=str, default="",
+                        help="Inclusive YYYY-MM-DD start date inside selected month")
+    parser.add_argument("--end-date", type=str, default="",
+                        help="Inclusive YYYY-MM-DD end date inside selected month")
     parser.add_argument("--delete-after-month", action="store_true", default=True,
                         help="Delete downloaded month data after training (saves disk space)")
     parser.add_argument("--keep-data", action="store_true",
                         help="Keep downloaded data (don't delete after training)")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="Run ingestion/alignment validation and reports without training")
+    parser.add_argument("--require-all-modalities", action="store_true",
+                        help="Fail if any --required-modalities entry is absent/zero after alignment")
+    parser.add_argument("--required-modalities", type=str,
+                        default=",".join(DEFAULT_REQUIRED_MODALITIES),
+                        help="Comma-separated modalities required for strict validation")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs-per-month", type=int, default=10,
                         help="Epochs to train on each month's data")
+    parser.add_argument("--max-train-windows", type=int, default=0,
+                        help="Limit valid windows after full validation; useful for CPU smoke training")
     args = parser.parse_args()
 
     if args.quick_test:
         args.epochs_per_month = 2
         logger.info("⚡ QUICK TEST MODE")
+    if args.validate_only:
+        args.keep_data = True
+        logger.info("VALIDATE-ONLY MODE: training/export will not run")
 
     logger.info("=" * 70)
     logger.info("AdityScan v4 — REAL Incremental Multi-Modal Training")
@@ -1411,7 +1655,10 @@ def main():
 
     # ── Initialize model ──────────────────────────────────────────────────────
     model = AdityScanModel(mc_dropout=0.1)
-    model.enable_image_branch()
+    if not args.no_suit:
+        model.enable_image_branch()
+    else:
+        logger.info("SUIT image branch disabled")
     model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -1422,7 +1669,7 @@ def main():
 
     # Resume from checkpoint
     if args.resume and Path(CKPT_PATH).exists():
-        ckpt = torch.load(CKPT_PATH, map_location="cpu", weights_only=True)
+        ckpt = torch.load(CKPT_PATH, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         logger.info("Resumed from checkpoint: TSS=%.3f (after %s)",
                     ckpt.get("best_tss", 0.0), ckpt.get("last_month", "?"))
@@ -1430,12 +1677,14 @@ def main():
     # Optimizer: differential learning rates per branch
     optimizer = optim.AdamW([
         {"params": model.xray_branch.parameters(),   "lr": 3e-4},  # PRIMARY
-        {"params": model.sharp_branch.parameters(),  "lr": 2e-4},  # SUPPLEMENTARY
-        {"params": model.insitu_branch.parameters(), "lr": 3e-4},  # SUPPLEMENTARY
+        {"params": model.insitu_branch.parameters(), "lr": 3e-4},  # MAG context
         {"params": model.fusion.parameters(),        "lr": 3e-4},  # FUSION
         {"params": model.nowcast_head.parameters(),  "lr": 3e-4},  # HEAD
         {"params": model.forecast_head.parameters(), "lr": 3e-4},  # HEAD
     ], weight_decay=1e-4)
+
+    if not args.no_sharp:
+        optimizer.add_param_group({"params": model.sharp_branch.parameters(), "lr": 2e-4})
 
     if model.image_branch is not None:
         optimizer.add_param_group({"params": model.image_branch.parameters(), "lr": 1e-4})
@@ -1481,9 +1730,23 @@ def main():
 
         if result is None:
             logger.warning("No usable data for %s — skipping", year_month)
-            if not args.keep_data:
+            if args.require_all_modalities:
+                raise SystemExit(f"{year_month} failed strict modality validation")
+            if not args.keep_data and not args.validate_only:
                 _safe_delete(month_dir)
             continue
+
+        if args.validate_only:
+            report = result.get("month_report", {})
+            failed = report.get("failed_required_modalities", [])
+            if failed and args.require_all_modalities:
+                raise SystemExit(f"{year_month} failed strict modality validation: {', '.join(failed)}")
+            logger.info("%s validation passed (%d windows)", year_month, len(result["valid_indices"]))
+            del result
+            gc.collect()
+            continue
+
+        _limit_training_windows(result, args, year_month)
 
         # ── TRAIN on this month ────────────────────────────────────────────────
         month_metrics = train_one_month(
@@ -1516,13 +1779,7 @@ def main():
             "last_month": year_month,
             "best_tss": global_best_tss,
             "all_metrics": all_metrics,
-            "architecture": {
-                "branches": ["SoLEXS+HEL1OS TCN (20 features + CWT wavelet)",
-                             "SHARP BiLSTM (21 SHARP magnetic params)",
-                             "MAG+SWIS InSitu MLP (14 in-situ features)"],
-                "fusion": "Cross-Modal Attention (4-head, 256-dim)",
-                "calibration": "Temperature Scaling (learnable)",
-            },
+            "architecture": _architecture_metadata(args),
         }, CKPT_PATH)
         logger.info("Checkpoint saved: %s (best TSS=%.3f)", CKPT_PATH, global_best_tss)
 
@@ -1536,6 +1793,10 @@ def main():
             _safe_delete(month_dir)
             logger.info("Deleted %s raw data to free disk space", year_month)
 
+    if args.validate_only:
+        logger.info("Validation-only complete. Reports are in %s", MODELS_DIR / "month_reports")
+        return
+
     # ══════════════════════════════════════════════════════════════════════════
     # FINAL: Conformal Calibration + ONNX Export
     # ══════════════════════════════════════════════════════════════════════════
@@ -1545,7 +1806,7 @@ def main():
     logger.info("=" * 70)
 
     # Temperature calibration (learnable scalar from the model)
-    T = float(model.fusion.temperature.item())
+    T = float(model.temperature.item())
     logger.info("Temperature scaling T=%.4f", T)
 
     # ── SOTA-2: Conformal Prediction Calibration ──────────────────────────────
@@ -1564,6 +1825,7 @@ def main():
         result_c = load_month_features(month_dir_c, GOES_DIR, sharp_file_c, year_month_c, args)
         if result_c is None:
             continue
+        _limit_training_windows(result_c, args, year_month_c)
         # Use last 10% of valid indices as conformal calibration set
         valid_idx_c = result_c["valid_indices"]
         cal_start = int(0.9 * len(valid_idx_c))
@@ -1579,8 +1841,12 @@ def main():
                 batch_size_c = X_s.size(0)
                 gnn_ei = torch.arange(batch_size_c, device=device).unsqueeze(0).repeat(2, 1)
                 gnn_bt = torch.arange(batch_size_c, device=device)
-                out = model(X_s.to(device), X_sh.to(device), X_i.to(device),
-                           image=X_su.to(device), gnn_edge_index=gnn_ei, gnn_batch=gnn_bt)
+                sharp_arg = X_sh.to(device) if result_c.get("use_sharp", True) else None
+                image_arg = X_su.to(device) if result_c.get("use_suit", True) else None
+                gnn_ei_arg = gnn_ei if result_c.get("use_gnn", True) else None
+                gnn_bt_arg = gnn_bt if result_c.get("use_gnn", True) else None
+                out = model(X_s.to(device), sharp_arg, X_i.to(device),
+                           image=image_arg, gnn_edge_index=gnn_ei_arg, gnn_batch=gnn_bt_arg)
                 p_hat = out["p_flare_15min"].cpu().numpy().ravel()  # already sigmoid'd
                 y_cal = y_b.numpy().ravel()
                 scores = np.abs(y_cal - p_hat)
@@ -1599,9 +1865,17 @@ def main():
         q_90, q_95 = 0.25, 0.35
         logger.warning("No conformal calibration data — using conservative defaults")
 
-    # Export ONNX
+    # Export ONNX. Some PyTorch builds require onnxscript in addition to onnx;
+    # keep report generation non-fatal if that optional exporter dep is absent.
     onnx_path = str(MODELS_DIR / "adityscan_v4.onnx")
-    export_onnx(model, onnx_path)
+    onnx_exported = False
+    onnx_error = ""
+    try:
+        export_onnx(model, onnx_path)
+        onnx_exported = True
+    except Exception as exc:
+        onnx_error = str(exc)
+        logger.warning("ONNX export skipped: %s", onnx_error)
 
     # Save training report
     report = {
@@ -1620,15 +1894,18 @@ def main():
         },
         "architecture": {
             "type": "AdityScanSOTA_v4.1",
+            "experiment": _architecture_metadata(args)["experiment"],
             "primary_branch": "SoLEXS+HEL1OS Causal-TCN, 6 layers dilation=[1,2,4,8,16,32], 256-dim",
-            "secondary_branch": "SHARP BiLSTM + Self-Attention, 3-layer bidirectional, 128-dim",
-            "insitu_branch": "MAG+SWIS InSitu-MLP, 3-layer GELU, 64-dim",
-            "fusion": "Cross-Modal Attention 4-head 256-dim (X-ray as primary query)",
+            "secondary_branch": "Disabled when --no-sharp is set; planned SHARP BiLSTM/GNN future scope",
+            "insitu_branch": "MAG InSitu-MLP with SWIS feature slots zero-padded when --no-swis is set",
+            "image_branch": "Disabled when --no-suit is set; planned SUIT UV image CNN future scope",
+            "fusion": "Cross-Modal Attention 4-head 256-dim (X-ray as primary query; missing branches zero-context)",
             "n_seq_features": 22,
             "n_sharp_features": 21,
             "n_insitu_features": 14,
             "window_seconds": 1800,
             "wavelet_transform": "PyWavelets cmor1.5-1.0 (Morlet), 8 scales 1-128s",
+            "current_run": _architecture_metadata(args),
         },
         "physics_features": {
             "hxr_spectral_index": "HEL1OS CdTe3/CZT2 power-law index γ (non-thermal: γ<4.5)",
@@ -1640,14 +1917,14 @@ def main():
             "primary": ["Aditya-L1 SoLEXS L1 (1-s ZIP archives from PRADAN)",
                         "Aditya-L1 HEL1OS L1 (1-s CdTe+CZT from PRADAN)"],
             "supplementary": ["Aditya-L1 MAG L2 (10-s Bx/By/Bz GSE)",
-                              "Aditya-L1 ASPEX-SWIS L2 (proton density/T/v)",
-                              "SDO/HMI SHARP CEA 720s (21 magnetic params)",
                               "GOES-18 XRS 1-min (flare labels)"],
+            "future_scope": _architecture_metadata(args)["future_scope_data_sources"],
             "derived": ["CWT QPP spectrogram", "Neupert integral", "HXR/SXR ratio",
                         "HXR spectral index γ", "Alfvén Mach number M_A",
                         "IMF clock/cone angles"],
         },
-        "onnx_path": onnx_path,
+        "onnx_path": onnx_path if onnx_exported else None,
+        "onnx_export_error": onnx_error,
     }
     report_path = str(MODELS_DIR / "training_report.json")
     with open(report_path, "w") as f:
@@ -1660,7 +1937,10 @@ def main():
     logger.info("")
     logger.info("  Global Best TSS:  %.3f", global_best_tss)
     logger.info("  Months trained:   %d", len([m for m in all_metrics if "month" in m]))
-    logger.info("  ONNX model:       %s", onnx_path)
+    if onnx_exported:
+        logger.info("  ONNX model:       %s", onnx_path)
+    else:
+        logger.info("  ONNX model:       skipped (%s)", onnx_error)
     logger.info("  Training report:  %s", report_path)
     logger.info("")
     logger.info("NEXT STEPS:")
