@@ -12,10 +12,10 @@ netCDF4>=1.6.0          # MAG netCDF files
 scikit-image>=0.22.0    # Image resizing (SUIT downsampling)
 
 # ── Machine Learning ─────────────────────────────────────────────────────────
-# torch>=2.2.0            # Neural network training + MC Dropout inference
-# torchvision>=0.17.0     # EfficientNet-B0 image branch
-# onnxruntime>=1.17.0     # CPU ONNX inference (2-5x faster than PyTorch)
-# xgboost>=2.0.0          # Phase C fine-tuning head (small Aditya-L1 dataset)
+torch>=2.2.0            # Neural network training + MC Dropout inference
+torchvision>=0.17.0     # EfficientNet-B0 image branch
+onnxruntime>=1.17.0     # CPU ONNX inference (2-5x faster than PyTorch)
+xgboost>=2.0.0          # Phase C fine-tuning head (small Aditya-L1 dataset)
 scikit-learn>=1.4.0     # RobustScaler, calibration, ROC AUC
 joblib>=1.3.0           # Model serialization
 

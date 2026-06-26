@@ -1,0 +1,81 @@
+{
+  "model_name": "AdityScan SoLEXS+HEL1OS Flare Predictor",
+  "model_version": "4.0.0",
+  "data_primary": [
+    "Aditya-L1 SoLEXS L1",
+    "Aditya-L1 HEL1OS L1"
+  ],
+  "data_dates": [
+    "20260621",
+    "20260622",
+    "20260623",
+    "20240629"
+  ],
+  "features": [
+    "solexs_counts",
+    "solexs_log",
+    "solexs_derivative",
+    "solexs_zscore_60s",
+    "solexs_zscore_300s",
+    "hxr_sxr_ratio",
+    "neupert_integral",
+    "hel_cdte_5_20_log",
+    "hel_cdte_20_30_log",
+    "hel_cdte_30_40_log",
+    "hel_cdte_40_60_log",
+    "hel_cdte_1.80kev_to_90_log",
+    "hel_czt_20_40_log",
+    "hel_czt_40_60_log",
+    "hel_czt_60_80_log",
+    "hel_czt_80_150_log",
+    "hel_czt_18_160_log"
+  ],
+  "n_features": 17,
+  "forecast_horizons_s": [
+    60,
+    120,
+    300,
+    600
+  ],
+  "window_seconds": 60,
+  "temperature_T": 0.863,
+  "phase_a_tcn": {
+    "epoch": 1,
+    "train_loss": 0.1635,
+    "tss": 0.2573,
+    "hss": 0.0229,
+    "auc": 0.5762,
+    "pod": 0.4467,
+    "far": 0.9794,
+    "threshold": 0.68
+  },
+  "phase_b_lstm": {
+    "epoch": 5,
+    "train_loss": 0.0549,
+    "tss": 0.2721,
+    "hss": 0.0218,
+    "auc": 0.5947,
+    "pod": 0.4833,
+    "far": 0.98,
+    "threshold": 0.08
+  },
+  "phase_c_fusion": {
+    "epoch": 13,
+    "train_loss": 0.0303,
+    "tss": 0.3752,
+    "hss": 0.0466,
+    "auc": 0.6138,
+    "pod": 0.5067,
+    "far": 0.9667,
+    "threshold": 0.01
+  },
+  "artifacts": {
+    "phase_a_checkpoint": "phase_a_tcn_best.pt",
+    "phase_b_checkpoint": "phase_b_lstm_best.pt",
+    "phase_c_checkpoint": "phase_c_fusion_best.pt",
+    "onnx_model": "adityscan_solexs_helios.onnx",
+    "scaler": "feature_scaler.pkl",
+    "temperature_scaler": "temperature_scaler.pkl",
+    "conformal_predictor": "conformal_predictor.pkl"
+  }
+}

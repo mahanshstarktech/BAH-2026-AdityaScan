@@ -32,7 +32,7 @@ from pipeline.ml.uncertainty import (
     ConformalPredictor,
     compute_reliability_diagram,
 )
-from pipeline.utils.metrics import build_contingency_table, find_optimal_threshold, roc_auc
+from utils.metrics import build_contingency_table, find_optimal_threshold, roc_auc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

@@ -43,10 +43,9 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 from pipeline.ml.fusion import XRayTCN
-from pipeline.utils.metrics import (
+from utils.metrics import (
     build_contingency_table,
     find_optimal_threshold,
-    goes_class_from_flux,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

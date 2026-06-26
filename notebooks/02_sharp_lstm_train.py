@@ -41,7 +41,7 @@ from torch.utils.data import Dataset, DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 from pipeline.ml.fusion import SHARPLSTMBranch
-from pipeline.utils.metrics import build_contingency_table, find_optimal_threshold, roc_auc
+from utils.metrics import build_contingency_table, find_optimal_threshold, roc_auc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

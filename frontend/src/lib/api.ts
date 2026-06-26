@@ -97,6 +97,18 @@ export interface DashboardData {
   forecast: Record<string, ForecastHorizon>;
   // HOPE precursor flag
   hopeFired: boolean;
+  // Aditya-L1 PRIMARY signals
+  solexsZ: number;
+  heliosSpike: boolean;
+  // SUIT
+  suitTriggered: boolean;
+  suitIntensity: number;
+  suitExtent: number;
+  suitLocation: string;
+  suitTriggerReason: string;
+  // Demo mode
+  demoMode: boolean;
+  demoScenario: string;
   // Time series
   lightCurve: LightCurvePoint[];
   solarWind: SolarWindPoint[];
@@ -129,6 +141,15 @@ const DEFAULT_DATA: DashboardData = {
   nowcast: DEFAULT_NOWCAST,
   forecast: {},
   hopeFired: false,
+  solexsZ: 0,
+  heliosSpike: false,
+  suitTriggered: false,
+  suitIntensity: 0,
+  suitExtent: 0,
+  suitLocation: "",
+  suitTriggerReason: "",
+  demoMode: false,
+  demoScenario: "x_flare",
   lightCurve: [],
   solarWind: [],
   solarWindCurrent: null,
@@ -288,6 +309,15 @@ export function useRealTimeData(): DashboardData {
         goesFlux:     msg.goes_flux    ?? prev.goesFlux,
         zScore:       msg.z_score      ?? prev.zScore,
         hopeFired:    msg.hope_fired   ?? false,
+        solexsZ:      msg.solexs_z     ?? prev.solexsZ,
+        heliosSpike:  msg.helios_spike ?? prev.heliosSpike,
+        suitTriggered:    msg.suit_triggered    ?? prev.suitTriggered,
+        suitIntensity:    msg.suit_intensity    ?? prev.suitIntensity,
+        suitExtent:       msg.suit_extent       ?? prev.suitExtent,
+        suitLocation:     msg.suit_location     ?? prev.suitLocation,
+        suitTriggerReason: msg.suit_trigger_reason ?? prev.suitTriggerReason,
+        demoMode:     msg.demo_mode    ?? prev.demoMode,
+        demoScenario: msg.demo_scenario ?? prev.demoScenario,
 
         solarWindCurrent: msg.imf_bz != null ? {
           bz: msg.imf_bz, bt: msg.imf_bt ?? 0,
