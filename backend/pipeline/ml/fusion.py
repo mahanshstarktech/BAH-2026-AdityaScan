@@ -30,11 +30,13 @@ Training phases (from architecture doc):
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from pipeline.ml.gnn import SympatheticFlareGNN
 
 
 # ── Temporal Convolutional Network (X-ray Branch) ────────────────────────────
@@ -104,7 +106,7 @@ class XRayTCN(nn.Module):
       Kernel size: 8
       Causal padding: no future leakage
     """
-    N_FEATURES = 11
+    N_FEATURES = 22
     OUTPUT_DIM = 256
 
     def __init__(self, dropout: float = 0.1) -> None:
@@ -282,6 +284,7 @@ class CrossModalAttentionFusion(nn.Module):
         self.proj_sharp = nn.Linear(128, d)       # 128 → 256
         self.proj_insitu = nn.Linear(64, d)       # 64 → 256
         self.proj_image = nn.Linear(256, d)       # 256 → 256 (EfficientNet output)
+        self.proj_gnn = nn.Linear(128, d)         # 128 → 256 (GNN output)
 
         # Cross-attention: query from X-ray, keys/values from all modalities
         self.attention = nn.MultiheadAttention(
@@ -305,6 +308,7 @@ class CrossModalAttentionFusion(nn.Module):
         sharp_emb: Optional[torch.Tensor] = None,    # (B, 128)
         insitu_emb: Optional[torch.Tensor] = None,   # (B, 64)
         image_emb: Optional[torch.Tensor] = None,    # (B, 256)
+        gnn_emb: Optional[torch.Tensor] = None,      # (B, 128)
     ) -> torch.Tensor:
         """
         Fuse all available branch embeddings.
@@ -332,6 +336,11 @@ class CrossModalAttentionFusion(nn.Module):
 
         if image_emb is not None:
             kvs.append(self.proj_image(image_emb))
+        else:
+            kvs.append(torch.zeros(B, d, device=device))
+
+        if gnn_emb is not None:
+            kvs.append(self.proj_gnn(gnn_emb))
         else:
             kvs.append(torch.zeros(B, d, device=device))
 
@@ -435,6 +444,9 @@ class AdityScanModel(nn.Module):
 
         # Image branch (EfficientNet-B0) — loaded separately if available
         self.image_branch: Optional[nn.Module] = None
+        
+        # GNN Branch
+        self.gnn_branch = SympatheticFlareGNN(dropout=mc_dropout)
 
         # Fusion
         self.fusion = CrossModalAttentionFusion(dropout=mc_dropout)
@@ -476,6 +488,8 @@ class AdityScanModel(nn.Module):
         insitu: Optional[torch.Tensor] = None,
         image: Optional[torch.Tensor] = None,
         sharp_lengths: Optional[torch.Tensor] = None,
+        gnn_edge_index: Optional[torch.Tensor] = None,
+        gnn_batch: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
         """
         Forward pass through the complete model.
@@ -501,9 +515,17 @@ class AdityScanModel(nn.Module):
         image_emb = None
         if image is not None and self.image_branch is not None:
             image_emb = self.image_branch(image)
+            
+        gnn_emb = None
+        if sharp is not None and gnn_edge_index is not None and gnn_batch is not None:
+            # We treat the last timestep of the sharp sequence as node features for the GNN
+            # (In a real setup, each AR would be a node. Here we simplify for hackathon)
+            if self.gnn_branch.enabled:
+                node_feat = sharp[:, -1, :] # (B, 21)
+                gnn_emb = self.gnn_branch(node_feat, gnn_edge_index, gnn_batch)
 
         # Fusion
-        fused = self.fusion(xray_emb, sharp_emb, insitu_emb, image_emb)
+        fused = self.fusion(xray_emb, sharp_emb, insitu_emb, image_emb, gnn_emb)
 
         # Temperature scaling of fused logits (calibration)
         fused_calibrated = fused / self.temperature.clamp(min=0.1)

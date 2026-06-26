@@ -1,4 +1,4 @@
-# AdityScan v3 — Production Requirements
+# AdityScan v4.1 — Production Requirements (SOTA Physics + Conformal Prediction)
 # Python 3.11+ required
 
 # ── Core data processing ─────────────────────────────────────────────────────
@@ -10,6 +10,8 @@ sunpy>=5.0.0            # SolarPy: GOES download, JSOC queries, HEK client
 cdflib>=1.2.0           # CDF file reading (ASPEX-SWIS, PAPA)
 netCDF4>=1.6.0          # MAG netCDF files
 scikit-image>=0.22.0    # Image resizing (SUIT downsampling)
+PyWavelets>=1.4.0       # CWT Morlet wavelet for QPP detection (SOTA)
+drms>=0.7.0             # NASA JSOC SHARP magnetic parameter downloads
 
 # ── Machine Learning ─────────────────────────────────────────────────────────
 torch>=2.2.0            # Neural network training + MC Dropout inference
