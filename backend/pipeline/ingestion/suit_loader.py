@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -172,6 +173,7 @@ class SUITLoader:
         """
         from astropy.io import fits
 
+        self._extract_zip_members(date_str)
         pattern = str(self.data_dir / "**" / "*.fits")
         all_files = glob.glob(pattern, recursive=True)
 
@@ -192,6 +194,30 @@ class SUITLoader:
 
         logger.info("Found %d SUIT images (filter=%s, date=%s)", len(images), filter_name, date_str)
         return images
+
+    def _extract_zip_members(self, date_str: Optional[str] = None) -> None:
+        """Accept original PRADAN ZIP drops by extracting FITS members once."""
+        zip_files = sorted(self.data_dir.glob("**/*.zip"))
+        if not zip_files:
+            return
+        extract_root = self.data_dir / "_extracted"
+        for zip_path in zip_files:
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    for member in zf.namelist():
+                        if not member.lower().endswith((".fits", ".fit", ".fts")):
+                            continue
+                        member_name = Path(member).name
+                        if date_str and date_str not in member_name:
+                            continue
+                        out_path = extract_root / zip_path.stem / member_name
+                        if out_path.exists():
+                            continue
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as src, out_path.open("wb") as dst:
+                            dst.write(src.read())
+            except Exception as exc:
+                logger.debug("Failed to inspect SUIT ZIP %s: %s", zip_path, exc)
 
     def extract_cnn_input(
         self,

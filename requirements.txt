@@ -17,6 +17,7 @@ drms>=0.7.0             # NASA JSOC SHARP magnetic parameter downloads
 torch>=2.2.0            # Neural network training + MC Dropout inference
 torchvision>=0.17.0     # EfficientNet-B0 image branch
 onnxruntime>=1.17.0     # CPU ONNX inference (2-5x faster than PyTorch)
+onnxscript>=0.1.0       # PyTorch ONNX exporter dependency
 xgboost>=2.0.0          # Phase C fine-tuning head (small Aditya-L1 dataset)
 scikit-learn>=1.4.0     # RobustScaler, calibration, ROC AUC
 joblib>=1.3.0           # Model serialization

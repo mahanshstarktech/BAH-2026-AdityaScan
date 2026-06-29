@@ -1,0 +1,111 @@
+{
+  "model_version": "4.1.0-sota-physics-conformal",
+  "trained_at": "2026-06-26T19:44:45.927166Z",
+  "months_trained": [
+    "2024-05"
+  ],
+  "global_best_tss": 0.0,
+  "per_month_metrics": [
+    {
+      "TSS": 0.0,
+      "HSS": 0.0,
+      "POD": 1.0,
+      "FAR": 0.0769,
+      "AUC": 0.4167,
+      "TP": 156,
+      "TN": 0,
+      "FP": 13,
+      "FN": 0,
+      "epoch": 1,
+      "month": "2024-05",
+      "threshold": 0.1
+    }
+  ],
+  "temperature_scaling": 1.0,
+  "conformal_prediction": {
+    "q_0.90": 0.4078,
+    "q_0.95": 0.685,
+    "n_calibration_scores": 7,
+    "coverage_guarantee": "90% of true outcomes fall within [P_hat \u00b1 q_0.90]",
+    "assumption": "Exchangeability (retrain monthly)"
+  },
+  "architecture": {
+    "type": "AdityScanSOTA_v4.1",
+    "experiment": "golden_window_lean",
+    "primary_branch": "SoLEXS+HEL1OS Causal-TCN, 6 layers dilation=[1,2,4,8,16,32], 256-dim",
+    "secondary_branch": "Disabled when --no-sharp is set; planned SHARP BiLSTM/GNN future scope",
+    "insitu_branch": "MAG InSitu-MLP with SWIS feature slots zero-padded when --no-swis is set",
+    "image_branch": "Disabled when --no-suit is set; planned SUIT UV image CNN future scope",
+    "fusion": "Cross-Modal Attention 4-head 256-dim (X-ray as primary query; missing branches zero-context)",
+    "n_seq_features": 22,
+    "n_sharp_features": 21,
+    "n_insitu_features": 14,
+    "window_seconds": 1800,
+    "wavelet_transform": "PyWavelets cmor1.5-1.0 (Morlet), 8 scales 1-128s",
+    "current_run": {
+      "experiment": "golden_window_lean",
+      "window": {
+        "start_date": "2024-05-10",
+        "end_date": "2024-05-20"
+      },
+      "required_modalities": [
+        "solexs",
+        "helios",
+        "mag",
+        "goes"
+      ],
+      "enabled_branches": [
+        "SoLEXS+HEL1OS causal TCN over 30-minute, 22-feature X-ray/physics windows",
+        "MAG-only in-situ MLP using 8 MAG features plus zero-padded SWIS slots"
+      ],
+      "used_data_sources": [
+        "Aditya-L1 SoLEXS L1 soft X-ray count-rate features",
+        "Aditya-L1 HEL1OS L1 hard X-ray CdTe/CZT band features",
+        "Aditya-L1 MAG L2 in-situ magnetic context",
+        "GOES-18 XRS labels / label cross-validation",
+        "Derived CWT QPP, Neupert, HXR/SXR, HXR spectral-index, and MAG geometry features"
+      ],
+      "future_scope_data_sources": [
+        "ASPEX-SWIS solar-wind plasma features",
+        "SUIT UV image CNN branch",
+        "SDO/HMI SHARP magnetic-complexity LSTM and GNN branch"
+      ],
+      "fusion": "Cross-modal attention with missing branches passed as learned zero-context slots",
+      "n_seq_features": 22,
+      "n_insitu_features": 14,
+      "n_sharp_features": 21,
+      "window_seconds": 1800
+    }
+  },
+  "physics_features": {
+    "hxr_spectral_index": "HEL1OS CdTe3/CZT2 power-law index \u03b3 (non-thermal: \u03b3<4.5)",
+    "alfven_mach_number": "v_sw / v_Alfven at L1 (CME shock: M_A>1)",
+    "neupert_integral": "Cumulative HXR integral \u221d SXR rise (Neupert 1968)",
+    "cwt_qpp_bands": "4 QPP frequency bands from Morlet CWT (1-128s)"
+  },
+  "data_sources": {
+    "primary": [
+      "Aditya-L1 SoLEXS L1 (1-s ZIP archives from PRADAN)",
+      "Aditya-L1 HEL1OS L1 (1-s CdTe+CZT from PRADAN)"
+    ],
+    "supplementary": [
+      "Aditya-L1 MAG L2 (10-s Bx/By/Bz GSE)",
+      "GOES-18 XRS 1-min (flare labels)"
+    ],
+    "future_scope": [
+      "ASPEX-SWIS solar-wind plasma features",
+      "SUIT UV image CNN branch",
+      "SDO/HMI SHARP magnetic-complexity LSTM and GNN branch"
+    ],
+    "derived": [
+      "CWT QPP spectrogram",
+      "Neupert integral",
+      "HXR/SXR ratio",
+      "HXR spectral index \u03b3",
+      "Alfv\u00e9n Mach number M_A",
+      "IMF clock/cone angles"
+    ]
+  },
+  "onnx_path": null,
+  "onnx_export_error": "No module named 'onnxscript'"
+}

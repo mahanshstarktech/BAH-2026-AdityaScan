@@ -54,6 +54,7 @@ HOPE precursor integration:
 from __future__ import annotations
 
 import glob
+import zipfile
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -161,6 +162,20 @@ class HEL1OSSpectrum:
     gamma_lo_guess: Optional[float] = None   # spectral index estimate (from ratio method)
 
 
+@dataclass
+class HEL1OSDailyRecord:
+    """Trainer-facing normalized HEL1OS sample."""
+    time_unix: float
+    cdte1_5_20: float = 0.0
+    cdte1_20_30: float = 0.0
+    cdte1_30_40: float = 0.0
+    cdte1_40_60: float = 0.0
+    czt1_20_40: float = 0.0
+    czt1_40_60: float = 0.0
+    czt1_60_80: float = 0.0
+    czt1_80_150: float = 0.0
+
+
 class HEL1OSLoader:
     """
     Loads Aditya-L1 HEL1OS L2 FITS data.
@@ -232,10 +247,154 @@ class HEL1OSLoader:
             except Exception as exc:
                 logger.debug("Failed to parse %s: %s", fp, exc)
 
-        logger.info("Found %d HEL1OS %s files", len(metas), detector)
+        if metas:
+            logger.info("Found %d HEL1OS %s L2 files", len(metas), detector)
+        else:
+            logger.debug("Found 0 HEL1OS %s L2 files", detector)
         return metas
 
     # ── Light curve extraction ────────────────────────────────────────────────
+
+    def load_day(self, date_str: str) -> list[HEL1OSDailyRecord]:
+        """
+        Load all HEL1OS CdTe/CZT files for one YYYYMMDD day and normalize them
+        into the feature names expected by the golden-month trainer.
+
+        Manual raw PRADAN ZIP drops are accepted: FITS members are extracted
+        once into data_dir/_extracted/ and then parsed through the normal path.
+        """
+        n_l1_files = self._extract_zip_members(date_str)
+
+        records_by_time: dict[float, HEL1OSDailyRecord] = {}
+        for detector in ("CdTe", "CZT"):
+            for meta in self.scan_directory(detector=detector, date_str=date_str):
+                try:
+                    lc = self.extract_lightcurve(meta, subtract_background=False)
+                except Exception as exc:
+                    logger.debug("HEL1OS load_day failed for %s: %s", meta.filepath, exc)
+                    continue
+
+                for i, t_raw in enumerate(lc.times_unix):
+                    t = float(t_raw)
+                    rec = records_by_time.setdefault(t, HEL1OSDailyRecord(time_unix=t))
+                    if detector == "CdTe":
+                        rec.cdte1_5_20 += self._band_value(lc, i, "cdte_5_12", "cdte_12_25")
+                        rec.cdte1_20_30 += self._band_value(lc, i, "cdte_12_25", "cdte_25_40")
+                        rec.cdte1_30_40 += self._band_value(lc, i, "cdte_25_40")
+                        rec.cdte1_40_60 += self._band_value(lc, i, "cdte_40_80")
+                    else:
+                        rec.czt1_20_40 += self._band_value(lc, i, "czt_20_40")
+                        rec.czt1_40_60 += self._band_value(lc, i, "czt_40_80")
+                        rec.czt1_60_80 += self._band_value(lc, i, "czt_40_80", "czt_80_120")
+                        rec.czt1_80_150 += self._band_value(lc, i, "czt_80_120", "czt_120_150")
+
+        n_l1_samples = self._load_l1_lightcurve_day(date_str, records_by_time)
+        if n_l1_samples:
+            logger.info(
+                "HEL1OS %s: loaded %d L1 lightcurve samples from %d ZIP/FITS files",
+                date_str,
+                n_l1_samples,
+                n_l1_files,
+            )
+
+        return [records_by_time[t] for t in sorted(records_by_time)]
+
+    @staticmethod
+    def _band_value(lc: HEL1OSLightCurve, idx: int, *names: str) -> float:
+        vals = []
+        for name in names:
+            arr = lc.band_rates.get(name)
+            if arr is not None and idx < len(arr):
+                vals.append(float(arr[idx]))
+        return float(np.mean(vals)) if vals else 0.0
+
+    def _extract_zip_members(self, date_str: str) -> int:
+        zip_files = sorted(self.data_dir.glob(f"**/*{date_str}*.zip"))
+        if not zip_files:
+            return 0
+        extract_root = self.data_dir / "_extracted"
+        extracted_or_cached = 0
+        for zip_path in zip_files:
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    for member in zf.namelist():
+                        if not member.lower().endswith((".fits", ".fit", ".fts")):
+                            continue
+                        member_name = Path(member).name
+                        if date_str not in member_name and date_str not in zip_path.name:
+                            continue
+                        out_path = extract_root / zip_path.stem / member_name
+                        if out_path.exists():
+                            extracted_or_cached += 1
+                            continue
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as src, out_path.open("wb") as dst:
+                            dst.write(src.read())
+                        extracted_or_cached += 1
+            except Exception as exc:
+                logger.debug("Failed to inspect HEL1OS ZIP %s: %s", zip_path, exc)
+        return extracted_or_cached
+
+    def _load_l1_lightcurve_day(
+        self,
+        date_str: str,
+        records_by_time: dict[float, HEL1OSDailyRecord],
+    ) -> int:
+        """Parse PRADAN HEL1OS L1 lightcurve_*.fits products."""
+        from astropy.io import fits
+
+        files = sorted(self.data_dir.glob(f"**/*{date_str}*/lightcurve_*.fits"))
+        if not files:
+            files = sorted(self.data_dir.glob("**/lightcurve_*.fits"))
+            files = [fp for fp in files if date_str in str(fp)]
+
+        n_samples = 0
+        for fp in files:
+            detector_hint = fp.name.lower()
+            try:
+                with fits.open(fp, memmap=True) as hdul:
+                    for hdu in hdul[1:]:
+                        data = hdu.data
+                        if data is None or not getattr(data, "names", None):
+                            continue
+                        if "MJD" not in data.names or "CTR" not in data.names:
+                            continue
+                        field_name = self._l1_field_name(str(hdu.header.get("EXTNAME", "")), detector_hint)
+                        if field_name is None:
+                            continue
+                        times_unix = (np.asarray(data["MJD"], dtype=np.float64) - 40587.0) * 86400.0
+                        rates = np.nan_to_num(np.asarray(data["CTR"], dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+                        for t_raw, rate in zip(times_unix, rates):
+                            t = float(t_raw)
+                            rec = records_by_time.setdefault(t, HEL1OSDailyRecord(time_unix=t))
+                            setattr(rec, field_name, getattr(rec, field_name) + max(float(rate), 0.0))
+                            n_samples += 1
+            except Exception as exc:
+                logger.debug("Failed to parse HEL1OS L1 lightcurve %s: %s", fp, exc)
+        return n_samples
+
+    @staticmethod
+    def _l1_field_name(extname: str, detector_hint: str) -> Optional[str]:
+        name = extname.upper()
+        if "CDTE" in name or "CDTE" in detector_hint.upper():
+            if "5.00KEV_TO_20.00KEV" in name:
+                return "cdte1_5_20"
+            if "20.00KEV_TO_30.00KEV" in name:
+                return "cdte1_20_30"
+            if "30.00KEV_TO_40.00KEV" in name:
+                return "cdte1_30_40"
+            if "40.00KEV_TO_60.00KEV" in name:
+                return "cdte1_40_60"
+        if "CZT" in name or "CZT" in detector_hint.upper():
+            if "20.00KEV_TO_40.00KEV" in name:
+                return "czt1_20_40"
+            if "40.00KEV_TO_60.00KEV" in name:
+                return "czt1_40_60"
+            if "60.00KEV_TO_80.00KEV" in name:
+                return "czt1_60_80"
+            if "80.00KEV_TO_150.00KEV" in name:
+                return "czt1_80_150"
+        return None
 
     def extract_lightcurve(
         self,

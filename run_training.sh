@@ -89,19 +89,19 @@ echo ""
 echo -e "${YELLOW}[3/6] Installing packages (first time: ~10 min)...${NC}"
 
 echo "    Core ML (PyTorch with M4 Metal GPU)..."
-pip install --quiet torch>=2.2.0 torchvision>=0.17.0
+pip install --quiet "torch>=2.2.0" "torchvision>=0.17.0"
 
 echo "    Scientific stack..."
-pip install --quiet numpy>=1.26.0 pandas>=2.0.0 scipy>=1.11.0 scikit-learn>=1.4.0
+pip install --quiet "numpy>=1.26.0" "pandas>=2.0.0" "scipy>=1.11.0" "scikit-learn>=1.4.0"
 
 echo "    Astronomy & solar physics + wavelet + physics deps..."
-pip install --quiet "astropy>=6.0.0" "sunpy[all]>=5.0.0" cdflib>=1.2.0 netCDF4>=1.6.0 scikit-image>=0.22.0 tqdm>=4.66.0 joblib>=1.3.0 xgboost>=2.0.0 PyWavelets>=1.4.0
+pip install --quiet "astropy>=6.0.0" "sunpy[all]>=5.0.0" "cdflib>=1.2.0" "netCDF4>=1.6.0" "scikit-image>=0.22.0" "tqdm>=4.66.0" "joblib>=1.3.0" "xgboost>=2.0.0" "PyWavelets>=1.4.0"
 
 echo "    Networking & Utilities (NASA JSOC, PRADAN)..."
-pip install --quiet drms>=0.7.0 httpx>=0.26.0 requests>=2.31.0 aiohttp>=3.9.0 python-dotenv>=1.0.0 python-dateutil>=2.8.0 pytz>=2024.1
+pip install --quiet "drms>=0.7.0" "httpx>=0.26.0" "requests>=2.31.0" "aiohttp>=3.9.0" "python-dotenv>=1.0.0" "python-dateutil>=2.8.0" "pytz>=2024.1"
 
 echo "    ONNX export..."
-pip install --quiet onnx>=1.17.0 onnxruntime>=1.17.0
+pip install --quiet "onnx>=1.17.0" "onnxruntime>=1.17.0" "onnxscript>=0.1.0"
 
 echo -e "${GREEN}  ✓ All packages installed${NC}"
 
@@ -162,7 +162,8 @@ python notebooks/06_incremental_real_train.py \
     --epochs-per-month 15 \
     --batch-size 32 \
     --delete-after-month \
-    --resume
+    --resume \
+    "$@"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
