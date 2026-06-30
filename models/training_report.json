@@ -1,7 +1,10 @@
 {
   "model_version": "4.1.0-sota-physics-conformal",
-  "trained_at": "2026-06-26T19:44:45.927166Z",
+  "trained_at": "2026-06-30T08:20:03.816903Z",
   "months_trained": [
+    "2024-03",
+    "2024-08",
+    "2024-09",
     "2024-05"
   ],
   "global_best_tss": 0.0,
@@ -10,11 +13,53 @@
       "TSS": 0.0,
       "HSS": 0.0,
       "POD": 1.0,
-      "FAR": 0.0769,
-      "AUC": 0.4167,
-      "TP": 156,
+      "FAR": 0.125,
+      "AUC": 0.8608,
+      "TP": 1260000,
       "TN": 0,
-      "FP": 13,
+      "FP": 180000,
+      "FN": 0,
+      "epoch": 1,
+      "month": "2024-03",
+      "threshold": 0.1
+    },
+    {
+      "TSS": 0.0,
+      "HSS": 0.0,
+      "POD": 1.0,
+      "FAR": 0.0742,
+      "AUC": 0.9113,
+      "TP": 1333200,
+      "TN": 0,
+      "FP": 106800,
+      "FN": 0,
+      "epoch": 1,
+      "month": "2024-08",
+      "threshold": 0.1
+    },
+    {
+      "TSS": 0.0,
+      "HSS": 0.0,
+      "POD": 1.0,
+      "FAR": 0.0783,
+      "AUC": 0.7232,
+      "TP": 1327200,
+      "TN": 0,
+      "FP": 112800,
+      "FN": 0,
+      "epoch": 1,
+      "month": "2024-09",
+      "threshold": 0.1
+    },
+    {
+      "TSS": 0.0,
+      "HSS": 0.0,
+      "POD": 1.0,
+      "FAR": 0.0975,
+      "AUC": 0.8472,
+      "TP": 1299600,
+      "TN": 0,
+      "FP": 140400,
       "FN": 0,
       "epoch": 1,
       "month": "2024-05",
@@ -23,9 +68,9 @@
   ],
   "temperature_scaling": 1.0,
   "conformal_prediction": {
-    "q_0.90": 0.4078,
-    "q_0.95": 0.685,
-    "n_calibration_scores": 7,
+    "q_0.90": 0.1474,
+    "q_0.95": 0.8752,
+    "n_calibration_scores": 2400,
     "coverage_guarantee": "90% of true outcomes fall within [P_hat \u00b1 q_0.90]",
     "assumption": "Exchangeability (retrain monthly)"
   },
@@ -45,27 +90,25 @@
     "current_run": {
       "experiment": "golden_window_lean",
       "window": {
-        "start_date": "2024-05-10",
-        "end_date": "2024-05-20"
+        "start_date": "month-start",
+        "end_date": "month-end"
       },
       "required_modalities": [
         "solexs",
         "helios",
-        "mag",
         "goes"
       ],
       "enabled_branches": [
-        "SoLEXS+HEL1OS causal TCN over 30-minute, 22-feature X-ray/physics windows",
-        "MAG-only in-situ MLP using 8 MAG features plus zero-padded SWIS slots"
+        "SoLEXS+HEL1OS causal TCN over 30-minute, 22-feature X-ray/physics windows"
       ],
       "used_data_sources": [
         "Aditya-L1 SoLEXS L1 soft X-ray count-rate features",
         "Aditya-L1 HEL1OS L1 hard X-ray CdTe/CZT band features",
-        "Aditya-L1 MAG L2 in-situ magnetic context",
         "GOES-18 XRS labels / label cross-validation",
         "Derived CWT QPP, Neupert, HXR/SXR, HXR spectral-index, and MAG geometry features"
       ],
       "future_scope_data_sources": [
+        "Aditya-L1 MAG L2 in-situ magnetic context",
         "ASPEX-SWIS solar-wind plasma features",
         "SUIT UV image CNN branch",
         "SDO/HMI SHARP magnetic-complexity LSTM and GNN branch"
@@ -93,6 +136,7 @@
       "GOES-18 XRS 1-min (flare labels)"
     ],
     "future_scope": [
+      "Aditya-L1 MAG L2 in-situ magnetic context",
       "ASPEX-SWIS solar-wind plasma features",
       "SUIT UV image CNN branch",
       "SDO/HMI SHARP magnetic-complexity LSTM and GNN branch"
@@ -106,6 +150,6 @@
       "IMF clock/cone angles"
     ]
   },
-  "onnx_path": null,
-  "onnx_export_error": "No module named 'onnxscript'"
+  "onnx_path": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/models/adityscan_v4.onnx",
+  "onnx_export_error": ""
 }

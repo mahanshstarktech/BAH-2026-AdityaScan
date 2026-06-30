@@ -56,8 +56,8 @@
   "month": "2024-08",
   "month_dir": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/pradan_cache/2024-08",
   "n_timesteps": 8293744,
-  "n_windows": 63114,
-  "positive_window_rate": 0.9255,
+  "n_windows": 63168,
+  "positive_window_rate": 0.924709,
   "required_modalities": [
     "solexs",
     "helios",

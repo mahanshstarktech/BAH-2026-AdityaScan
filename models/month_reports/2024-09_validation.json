@@ -1,21 +1,21 @@
 {
-  "end_date": "2024-03-15",
+  "end_date": "2024-09-20",
   "failed_required_modalities": [],
   "goes_dir": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/goes",
   "modalities": {
     "goes": {
       "aligned_nonzero_fraction": 1.0,
-      "detail": "31 GOES netCDF files",
+      "detail": "30 GOES netCDF files",
       "name": "goes",
       "passed": true,
-      "records": 21270
+      "records": 23040
     },
     "helios": {
-      "aligned_nonzero_fraction": 0.051881,
+      "aligned_nonzero_fraction": 0.097799,
       "detail": "HEL1OS CdTe/CZT hard X-ray bands aligned to SoLEXS",
       "name": "helios",
       "passed": true,
-      "records": 7829118
+      "records": 7323482
     },
     "mag": {
       "aligned_nonzero_fraction": 0.0,
@@ -32,11 +32,11 @@
       "records": 0
     },
     "solexs": {
-      "aligned_nonzero_fraction": 0.343061,
+      "aligned_nonzero_fraction": 0.429572,
       "detail": "SoLEXS SDD2 count-rate samples",
       "name": "solexs",
       "passed": true,
-      "records": 10036712
+      "records": 8968072
     },
     "suit": {
       "aligned_nonzero_fraction": 0.0,
@@ -53,20 +53,20 @@
       "records": 0
     }
   },
-  "month": "2024-03",
-  "month_dir": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/pradan_cache/2024-03",
-  "n_timesteps": 10036712,
-  "n_windows": 56791,
-  "positive_window_rate": 0.876847,
+  "month": "2024-09",
+  "month_dir": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/pradan_cache/2024-09",
+  "n_timesteps": 8968072,
+  "n_windows": 72311,
+  "positive_window_rate": 0.932528,
   "required_modalities": [
     "solexs",
     "helios",
     "goes"
   ],
   "seq_feature_shape": [
-    10036712,
+    8968072,
     22
   ],
-  "sharp_file": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/sharp/sharp_2024-03.csv",
-  "start_date": "2024-03-01"
+  "sharp_file": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/sharp/sharp_2024-09.csv",
+  "start_date": "2024-09-05"
 }

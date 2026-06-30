@@ -18,11 +18,11 @@
       "records": 6164035
     },
     "mag": {
-      "aligned_nonzero_fraction": 0.336907,
+      "aligned_nonzero_fraction": 0.0,
       "detail": "MAG L2 in-situ magnetic features",
       "name": "mag",
-      "passed": true,
-      "records": 34560
+      "passed": false,
+      "records": 0
     },
     "sharp": {
       "aligned_nonzero_fraction": 0.0,
@@ -56,12 +56,11 @@
   "month": "2024-05",
   "month_dir": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/pradan_cache/2024-05",
   "n_timesteps": 7388976,
-  "n_windows": 75903,
-  "positive_window_rate": 0.960963,
+  "n_windows": 75986,
+  "positive_window_rate": 0.959914,
   "required_modalities": [
     "solexs",
     "helios",
-    "mag",
     "goes"
   ],
   "seq_feature_shape": [
