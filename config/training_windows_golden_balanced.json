@@ -1,0 +1,51 @@
+{
+  "name": "golden_balanced_aditya_l1_v1",
+  "description": "Balanced lean Aditya-L1 training plan: quiet/control windows plus May 2024 extreme flare window.",
+  "required_modalities": ["solexs", "helios", "goes"],
+  "optional_modalities": ["mag"],
+  "manual_modalities": ["mag"],
+  "auto_modalities": ["solexs", "helios", "goes"],
+  "future_modalities": ["swis", "suit", "sharp"],
+  "windows": [
+    {
+      "month": "2024-03",
+      "start_date": "2024-03-01",
+      "end_date": "2024-03-15",
+      "role": "quiet_control",
+      "description": "Quiet/control Sun for true negatives",
+      "weight": 1.0
+    },
+    {
+      "month": "2024-06",
+      "start_date": "2024-06-15",
+      "end_date": "2024-06-30",
+      "role": "quiet_control",
+      "description": "Post-May quieter background/control interval",
+      "weight": 1.0
+    },
+    {
+      "month": "2024-08",
+      "start_date": "2024-08-10",
+      "end_date": "2024-08-25",
+      "role": "quiet_control",
+      "description": "Quiet/control background interval",
+      "weight": 1.0
+    },
+    {
+      "month": "2024-09",
+      "start_date": "2024-09-05",
+      "end_date": "2024-09-20",
+      "role": "quiet_control",
+      "description": "Quiet/control background interval",
+      "weight": 1.0
+    },
+    {
+      "month": "2024-05",
+      "start_date": "2024-05-10",
+      "end_date": "2024-05-20",
+      "role": "flare_positive",
+      "description": "Extreme May 2024 flare/Gannon storm positive set",
+      "weight": 1.5
+    }
+  ]
+}

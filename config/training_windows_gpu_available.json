@@ -1,0 +1,29 @@
+{
+  "description": "GPU-only sequential update windows with required SoLEXS, HEL1OS, and GOES currently available in cache. March is excluded until HEL1OS March files are restored manually.",
+  "windows": [
+    {
+      "month": "2024-08",
+      "start_date": "2024-08-10",
+      "end_date": "2024-08-25",
+      "role": "quiet_control",
+      "description": "Quiet/control background interval with manual HEL1OS",
+      "weight": 1.0
+    },
+    {
+      "month": "2024-09",
+      "start_date": "2024-09-05",
+      "end_date": "2024-09-20",
+      "role": "quiet_control",
+      "description": "Quiet/control background interval with manual HEL1OS",
+      "weight": 1.0
+    },
+    {
+      "month": "2024-05",
+      "start_date": "2024-05-10",
+      "end_date": "2024-05-20",
+      "role": "flare_positive",
+      "description": "Extreme May 2024 flare/Gannon storm positive set",
+      "weight": 1.5
+    }
+  ]
+}

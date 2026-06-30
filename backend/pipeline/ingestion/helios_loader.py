@@ -321,6 +321,9 @@ class HEL1OSLoader:
                         if not member.lower().endswith((".fits", ".fit", ".fts")):
                             continue
                         member_name = Path(member).name
+                        member_lower = member_name.lower()
+                        if not member_lower.startswith(("lightcurve_cdte", "lightcurve_czt")):
+                            continue
                         if date_str not in member_name and date_str not in zip_path.name:
                             continue
                         out_path = extract_root / zip_path.stem / member_name

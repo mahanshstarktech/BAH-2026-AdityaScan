@@ -1,0 +1,72 @@
+{
+  "end_date": "2024-03-15",
+  "failed_required_modalities": [],
+  "goes_dir": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/goes",
+  "modalities": {
+    "goes": {
+      "aligned_nonzero_fraction": 1.0,
+      "detail": "31 GOES netCDF files",
+      "name": "goes",
+      "passed": true,
+      "records": 21270
+    },
+    "helios": {
+      "aligned_nonzero_fraction": 0.051881,
+      "detail": "HEL1OS CdTe/CZT hard X-ray bands aligned to SoLEXS",
+      "name": "helios",
+      "passed": true,
+      "records": 7829118
+    },
+    "mag": {
+      "aligned_nonzero_fraction": 0.0,
+      "detail": "MAG L2 in-situ magnetic features",
+      "name": "mag",
+      "passed": false,
+      "records": 0
+    },
+    "sharp": {
+      "aligned_nonzero_fraction": 0.0,
+      "detail": "0 SHARP magnetic parameters aligned",
+      "name": "sharp",
+      "passed": false,
+      "records": 0
+    },
+    "solexs": {
+      "aligned_nonzero_fraction": 0.343061,
+      "detail": "SoLEXS SDD2 count-rate samples",
+      "name": "solexs",
+      "passed": true,
+      "records": 10036712
+    },
+    "suit": {
+      "aligned_nonzero_fraction": 0.0,
+      "detail": "SUIT UV image arrays loaded",
+      "name": "suit",
+      "passed": false,
+      "records": 0
+    },
+    "swis": {
+      "aligned_nonzero_fraction": 0.0,
+      "detail": "ASPEX-SWIS L2 bulk solar wind features",
+      "name": "swis",
+      "passed": false,
+      "records": 0
+    }
+  },
+  "month": "2024-03",
+  "month_dir": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/pradan_cache/2024-03",
+  "n_timesteps": 10036712,
+  "n_windows": 56819,
+  "positive_window_rate": 0.876415,
+  "required_modalities": [
+    "solexs",
+    "helios",
+    "goes"
+  ],
+  "seq_feature_shape": [
+    10036712,
+    22
+  ],
+  "sharp_file": "/Users/rishitabohra/Documents/BAH-2026/BAH-2026-AdityaScan/data/sharp/sharp_2024-03.csv",
+  "start_date": "2024-03-01"
+}

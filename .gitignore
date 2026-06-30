@@ -6,6 +6,7 @@ __pycache__/
 .env
 .env.local
 .env.production
+.env.training.local
 *.egg-info/
 dist/
 build/
