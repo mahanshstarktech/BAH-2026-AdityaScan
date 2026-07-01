@@ -28,16 +28,6 @@ DATA SOURCES USED (ALL modalities, as promised):
     ✅ SUIT UV images — 200-400nm, 1 image per day (from PRADAN)
     ✅ SDO AIA 304Å  — active region detection (from JSOC)
 
-GOLDEN-WINDOW MODE:
--------------------------------------------------------
-  For manually uploaded May 10-20 data, run with:
-    --months 2024-05 --skip-download --start-date 2024-05-10 --end-date 2024-05-20
-    --required-modalities solexs,helios,mag,goes --no-sharp --no-suit --no-swis
-
-  This trains the lean architecture used for the current experiment:
-    SoLEXS + HEL1OS X-ray TCN, MAG in-situ context, GOES labels.
-    SWIS, SUIT, and SHARP are excluded from training and reported as future scope.
-
 WAVELET TRANSFORM (Quasi-Periodic Pulsation detection):
 -------------------------------------------------------
     ✅ Continuous Wavelet Transform applied to SoLEXS light curves
@@ -77,8 +67,6 @@ USAGE (your friend just runs):
   --skip-download              Use already-downloaded data in data/pradan_cache/
   --quick-test                 Test 3 days only (verify setup works)
   --no-suit                    Skip SUIT image branch (faster, less disk)
-  --validate-only              Build month features/reports, then exit before training
-  --require-all-modalities     Fail validation if any required modality is missing/zero
 """
 
 from __future__ import annotations
@@ -95,7 +83,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -106,6 +94,8 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 # ── Setup paths ────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
+os.environ.setdefault("SUNPY_CONFIGDIR", str(ROOT / ".sunpy"))
+(ROOT / ".sunpy").mkdir(exist_ok=True)
 
 from pipeline.ingestion.solexs_loader import SoLEXSLoader
 from pipeline.ingestion.helios_loader import HEL1OSLoader
@@ -114,7 +104,7 @@ from pipeline.ingestion.aspex_swis_loader import SWISLoader
 from pipeline.ingestion.suit_loader import SUITLoader
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-LOG_FILE = ROOT / "training.log"
+LOG_FILE = ROOT / "train.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -130,165 +120,21 @@ MODELS_DIR   = ROOT / "models"
 CACHE_DIR    = ROOT / "data" / "pradan_cache"
 GOES_DIR     = ROOT / "data" / "goes"
 SHARP_DIR    = ROOT / "data" / "sharp"
+REPORTS_DIR  = MODELS_DIR / "month_reports"
 MODELS_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 GOES_DIR.mkdir(parents=True, exist_ok=True)
 SHARP_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-
-DEFAULT_REQUIRED_MODALITIES = ("solexs", "helios", "mag", "goes")
-
-
-def _nonzero_fraction(arr: np.ndarray) -> float:
-    if arr.size == 0:
-        return 0.0
-    return float(np.count_nonzero(np.nan_to_num(arr)) / arr.size)
-
-
-def _modality_status(name: str, records: int, aligned_nonzero_fraction: float, detail: str = "") -> dict:
-    return {
-        "name": name,
-        "records": int(records),
-        "aligned_nonzero_fraction": round(float(aligned_nonzero_fraction), 6),
-        "passed": bool(records > 0 and aligned_nonzero_fraction > 0.0),
-        "detail": detail,
-    }
-
-
-def _write_month_report(year_month: str, report: dict) -> Path:
-    report_dir = MODELS_DIR / "month_reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    path = report_dir / f"{year_month}_validation.json"
-    with path.open("w") as f:
-        json.dump(report, f, indent=2, sort_keys=True)
-    logger.info("Month validation report written: %s", path)
-    return path
-
-
-def _required_modalities(args) -> tuple[str, ...]:
-    raw = getattr(args, "required_modalities", "") or ",".join(DEFAULT_REQUIRED_MODALITIES)
-    return tuple(m.strip().lower() for m in raw.split(",") if m.strip())
-
-
-def _load_training_manifest(path: str) -> list[tuple[str, str, float]]:
-    manifest_path = Path(path)
-    with manifest_path.open() as f:
-        manifest = json.load(f)
-
-    windows = manifest.get("windows", [])
-    if not windows:
-        raise ValueError(f"{manifest_path} has no training windows")
-
-    months: list[tuple[str, str, float]] = []
-    for entry in windows:
-        month = str(entry["month"])
-        start = str(entry["start_date"])
-        end = str(entry["end_date"])
-        role = str(entry.get("role", "training"))
-        desc = str(entry.get("description", role))
-        weight = float(entry.get("weight", 1.0))
-        months.append((month, f"{role}: {desc} [{start}..{end}]", weight))
-    return months
-
-
-def _manifest_windows(path: str) -> dict[str, dict]:
-    if not path:
-        return {}
-    with Path(path).open() as f:
-        manifest = json.load(f)
-    return {
-        str(entry["month"]): {
-            "start_date": str(entry["start_date"]),
-            "end_date": str(entry["end_date"]),
-            "role": str(entry.get("role", "training")),
-        }
-        for entry in manifest.get("windows", [])
-    }
-
-
-def _architecture_metadata(args) -> dict:
-    used = [
-        "Aditya-L1 SoLEXS L1 soft X-ray count-rate features",
-        "Aditya-L1 HEL1OS L1 hard X-ray CdTe/CZT band features",
-        "GOES-18 XRS labels / label cross-validation",
-        "Derived CWT QPP, Neupert, HXR/SXR, HXR spectral-index, and MAG geometry features",
-    ]
-    future_scope = []
-    if not getattr(args, "no_mag", False):
-        used.append("Aditya-L1 MAG L2 in-situ magnetic context")
-    else:
-        future_scope.append("Aditya-L1 MAG L2 in-situ magnetic context")
-    if getattr(args, "no_swis", False):
-        future_scope.append("ASPEX-SWIS solar-wind plasma features")
-    if getattr(args, "no_suit", False):
-        future_scope.append("SUIT UV image CNN branch")
-    if getattr(args, "no_sharp", False):
-        future_scope.append("SDO/HMI SHARP magnetic-complexity LSTM and GNN branch")
-
-    enabled_branches = [
-        "SoLEXS+HEL1OS causal TCN over 30-minute, 22-feature X-ray/physics windows",
-    ]
-    if not getattr(args, "no_mag", False):
-        enabled_branches.append("MAG-only in-situ MLP using 8 MAG features plus zero-padded SWIS slots")
-    if not getattr(args, "no_sharp", False):
-        enabled_branches.append("SHARP BiLSTM / GNN magnetic-context branch")
-    if not getattr(args, "no_suit", False):
-        enabled_branches.append("SUIT image CNN branch")
-
-    return {
-        "experiment": "golden_window_lean" if future_scope else "full_multimodal",
-        "window": {
-            "start_date": getattr(args, "start_date", "") or "month-start",
-            "end_date": getattr(args, "end_date", "") or "month-end",
-        },
-        "required_modalities": list(_required_modalities(args)),
-        "enabled_branches": enabled_branches,
-        "used_data_sources": used,
-        "future_scope_data_sources": future_scope,
-        "fusion": "Cross-modal attention with missing branches passed as learned zero-context slots",
-        "n_seq_features": 22,
-        "n_insitu_features": 14,
-        "n_sharp_features": 21,
-        "window_seconds": 1800,
-    }
-
-
-def _month_bounds(year: str, month: str, args) -> tuple[datetime, datetime]:
-    year_month = f"{year}-{month}"
-    start_dt = datetime(int(year), int(month), 1)
-    if int(month) == 12:
-        end_dt = datetime(int(year) + 1, 1, 1)
-    else:
-        end_dt = datetime(int(year), int(month) + 1, 1)
-
-    month_window = getattr(args, "month_windows", {}).get(year_month, {})
-    start_arg = month_window.get("start_date") or getattr(args, "start_date", "")
-    end_arg = month_window.get("end_date") or getattr(args, "end_date", "")
-
-    if start_arg:
-        start_dt = max(start_dt, datetime.strptime(start_arg, "%Y-%m-%d"))
-    if end_arg:
-        end_dt = min(end_dt, datetime.strptime(end_arg, "%Y-%m-%d") + timedelta(days=1))
-    if start_dt >= end_dt:
-        raise ValueError(f"Invalid date window: {start_dt.date()} to {end_dt.date()}")
-    return start_dt, end_dt
-
-
-def _limit_training_windows(ds_info: dict, args, year_month: str) -> None:
-    max_windows = int(getattr(args, "max_train_windows", 0) or 0)
-    if max_windows <= 0:
-        return
-    valid_indices = ds_info.get("valid_indices")
-    if valid_indices is None or len(valid_indices) <= max_windows:
-        return
-    positions = np.linspace(0, len(valid_indices) - 1, max_windows, dtype=np.int32)
-    ds_info["valid_indices"] = valid_indices[positions]
-    logger.info(
-        "%s bounded CPU training: using %d/%d windows",
-        year_month,
-        len(ds_info["valid_indices"]),
-        len(valid_indices),
-    )
+REQUIRED_MODALITIES = ("solexs", "helios", "mag", "swis", "suit", "goes", "sharp")
+MODALITY_FILE_GLOBS = {
+    "solexs": ["**/AL1_SLX_L1_*.zip", "**/*.fits", "**/*.lc.gz", "**/*.nc"],
+    "helios": ["**/*.zip", "**/*CdTe*.fits", "**/*CZT*.fits", "**/AL1_HXS91_*.fits"],
+    "mag": ["**/L2_AL1_MAG_*.nc"],
+    "swis": ["**/AL1_ASW91_L2_*.cdf"],
+    "suit": ["**/*.fits", "**/*.zip"],
+}
 
 # ── Training months in priority order ──────────────────────────────────────────
 # These are ordered by SCIENTIFIC VALUE (biggest flare events first)
@@ -317,7 +163,7 @@ TRAINING_MONTHS = [
 # DEVICE DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_device(require_gpu: bool = False) -> torch.device:
+def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         logger.info("✅ Apple M4 Metal GPU (MPS) — using MPS backend")
@@ -325,20 +171,135 @@ def get_device(require_gpu: bool = False) -> torch.device:
         device = torch.device("cuda")
         logger.info("✅ CUDA GPU: %s", torch.cuda.get_device_name(0))
     else:
-        msg = (
-            "CPU only — no GPU backend is available "
-            f"(mps_built={torch.backends.mps.is_built()}, "
-            f"mps_available={torch.backends.mps.is_available()}, "
-            f"cuda_available={torch.cuda.is_available()}, torch={torch.__version__})"
-        )
-        if require_gpu:
-            raise RuntimeError(msg + ". Refusing to train because --require-gpu was set.")
         device = torch.device("cpu")
-        logger.warning(
-            "⚠️  %s",
-            msg,
-        )
+        logger.warning("⚠️  CPU only — training will be slow")
     return device
+
+
+def _month_date_range(year_month: str, quick_test: bool = False) -> tuple[datetime, datetime, list[str]]:
+    year, month = year_month.split("-")
+    start = datetime(int(year), int(month), 1)
+    if int(month) == 12:
+        end = datetime(int(year) + 1, 1, 1)
+    else:
+        end = datetime(int(year), int(month) + 1, 1)
+
+    days = []
+    current = start
+    while current < end:
+        days.append(current.strftime("%Y%m%d"))
+        current += timedelta(days=1)
+
+    if quick_test:
+        days = days[:3]
+        end = start + timedelta(days=len(days))
+
+    return start, end, days
+
+
+def _count_files(root: Path, patterns: list[str]) -> int:
+    matched: set[Path] = set()
+    if not root.exists():
+        return 0
+    for pattern in patterns:
+        matched.update(root.glob(pattern))
+    return len(matched)
+
+
+def _float_ratio(num: int, den: int) -> float:
+    return float(num / den) if den else 0.0
+
+
+def _base_modality_report(month_dir: Path, goes_dir: Path, sharp_file: Path, year_month: str) -> dict[str, dict[str, Any]]:
+    report: dict[str, dict[str, Any]] = {}
+    for name in REQUIRED_MODALITIES:
+        report[name] = {
+            "required": True,
+            "file_count": 0,
+            "parsed_samples": 0,
+            "nonzero_fraction": 0.0,
+            "status": "pending",
+            "failures": [],
+        }
+
+    for modality, patterns in MODALITY_FILE_GLOBS.items():
+        report[modality]["file_count"] = _count_files(month_dir / modality, patterns)
+
+    year, month = year_month.split("-")
+    report["goes"]["file_count"] = len(list(goes_dir.glob(f"*_g18_d{year}{month}*_*.nc")))
+    report["sharp"]["file_count"] = int(sharp_file.exists() and sharp_file.stat().st_size > 0)
+    return report
+
+
+def _finalize_modality_report(modality_report: dict[str, dict[str, Any]]) -> None:
+    for info in modality_report.values():
+        failures = info["failures"]
+        if failures:
+            info["status"] = "failed"
+        elif info["parsed_samples"] > 0 and info["nonzero_fraction"] > 0.0:
+            info["status"] = "ok"
+        elif info["file_count"] == 0:
+            info["status"] = "missing"
+            info["failures"].append("no files found")
+        else:
+            info["status"] = "empty"
+            if "parsed output was empty" not in failures:
+                info["failures"].append("parsed output was empty")
+
+
+def _required_modality_failures(modality_report: dict[str, dict[str, Any]]) -> list[str]:
+    failures = []
+    for name in REQUIRED_MODALITIES:
+        info = modality_report[name]
+        if info["status"] != "ok":
+            reason = "; ".join(info["failures"]) if info["failures"] else info["status"]
+            failures.append(f"{name}: {reason}")
+    return failures
+
+
+def _write_month_report(year_month: str, kind: str, payload: dict[str, Any]) -> Path:
+    path = REPORTS_DIR / f"{year_month}_{kind}.json"
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    return path
+
+
+def _self_loop_gnn_inputs(batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    nodes = torch.arange(batch_size, device=device, dtype=torch.long)
+    edge_index = torch.stack([nodes, nodes], dim=0)
+    return edge_index, nodes
+
+
+def _enforce_required_modalities(year_month: str, modality_report: dict[str, dict[str, Any]]) -> None:
+    failures = _required_modality_failures(modality_report)
+    if failures:
+        raise RuntimeError(
+            f"{year_month}: required modality validation failed: " + " | ".join(failures)
+        )
+
+
+def _build_month_report_payload(
+    year_month: str,
+    result: dict[str, Any],
+    args,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "year_month": year_month,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "load_ok": result.get("load_ok", False),
+        "validate_only": bool(getattr(args, "validate_only", False)),
+        "require_all_modalities": bool(getattr(args, "require_all_modalities", False)),
+        "errors": result.get("errors", []),
+        "modality_report": result.get("modality_report", {}),
+    }
+    if result.get("load_ok"):
+        payload["n_seq_features"] = int(result["seq_features"].shape[1])
+        payload["n_valid_windows"] = int(len(result["valid_indices"]))
+        payload["positive_window_fraction"] = float(result["y_raw"][result["valid_indices"]].mean())
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -426,13 +387,11 @@ def download_month_pradan(year_month: str, args) -> dict[str, Path]:
                 # observation IDs and processing timestamps in the filenames.
                 import re as _re
                 instruments_to_browse = {
-                    "helios": "hel1os",
-                    "mag": "mag",
+                    "helios": "hel1os", 
+                    "mag": "mag", 
+                    "swis": "swis", 
+                    "suit": "suit"
                 }
-                if not getattr(args, "no_swis", False):
-                    instruments_to_browse["swis"] = "swis"
-                if not getattr(args, "no_suit", False):
-                    instruments_to_browse["suit"] = "suit"
 
                 for inst_key, pradan_id in instruments_to_browse.items():
                     day_files = []
@@ -519,76 +478,34 @@ def download_month_goes(year_month: str, args) -> Path:
     """
     Download GOES XRS data for one month from NOAA NCEI.
     GOES data is FREE, no login required.
-    Downloads compact 1-minute average netCDF (.nc) files into GOES_DIR.
+    sunpy downloads netCDF (.nc) files into GOES_DIR.
     Returns GOES_DIR (not a single file — there are multiple .nc per month).
     """
     year, month = year_month.split("-")
 
-    # Check if we already have the compact 1-minute GOES files for this month.
-    existing_avg1m = list(GOES_DIR.glob(f"*avg1m*_g18_d{year}{month}*_*.nc"))
-    if len(existing_avg1m) >= 10:
-        logger.info("GOES %s already cached: %d avg1m nc files", year_month, len(existing_avg1m))
+    # Check if we already have .nc files for this month
+    existing_nc = list(GOES_DIR.glob(f"*_g18_d{year}{month}*_*.nc"))
+    if len(existing_nc) >= 10:
+        logger.info("GOES %s already cached: %d nc files", year_month, len(existing_nc))
         return GOES_DIR
 
-    logger.info("Downloading GOES XRS avg1m data for %s from NOAA...", year_month)
+    logger.info("Downloading GOES XRS data for %s from NOAA...", year_month)
     try:
-        import calendar
-        import urllib.error
-        import urllib.request
-
-        GOES_DIR.mkdir(parents=True, exist_ok=True)
-        yyyy = int(year)
-        mm = int(month)
-        days_in_month = calendar.monthrange(yyyy, mm)[1]
-        downloaded = 0
-        skipped = 0
-        base_url = (
-            "https://data.ngdc.noaa.gov/platforms/solar-space-observing-satellites/"
-            f"goes/goes18/l2/data/xrsf-l2-avg1m/{year}/{month}/"
-        )
-        for day in range(1, days_in_month + 1):
-            date_str = f"{year}{month}{day:02d}"
-            filename = f"dn_xrsf-l2-avg1m_g18_d{date_str}_v2-2-1.nc"
-            dest = GOES_DIR / filename
-            if dest.exists() and dest.stat().st_size > 10_000:
-                skipped += 1
-                continue
-            try:
-                urllib.request.urlretrieve(base_url + filename, dest)
-                if dest.stat().st_size <= 10_000:
-                    dest.unlink(missing_ok=True)
-                    logger.debug("GOES %s too small; removed", filename)
-                    continue
-                downloaded += 1
-            except urllib.error.HTTPError as exc:
-                if exc.code != 404:
-                    logger.warning("GOES %s download HTTP %s", filename, exc.code)
-            except Exception as exc:
-                logger.warning("GOES %s download failed: %s", filename, exc)
-
-        logger.info("GOES %s avg1m ready: %d downloaded, %d cached", year_month, downloaded, skipped)
-        return GOES_DIR
-
-    except Exception as exc:
-        logger.error("GOES avg1m direct download failed: %s", exc)
-
-    logger.info("Falling back to SunPy GOES download for %s...", year_month)
-    try:
+        import sunpy.timeseries as ts
         from sunpy.net import Fido, attrs
 
+        start_date = f"{year}-{month}-01"
         start_dt = datetime(int(year), int(month), 1)
         if int(month) == 12:
             end_dt = datetime(int(year) + 1, 1, 1)
         else:
             end_dt = datetime(int(year), int(month) + 1, 1)
-        start_date = f"{year}-{month}-01"
         end_date = end_dt.strftime("%Y-%m-%d")
 
         result = Fido.search(
             attrs.Time(start_date, end_date),
             attrs.Instrument.xrs,
             attrs.goes.SatelliteNumber(18),
-            attrs.Level(2),
         )
         if len(result) == 0:
             logger.warning("No GOES data found via sunpy for %s", year_month)
@@ -616,7 +533,7 @@ def download_month_sharp(year_month: str, args) -> Path:
     year, month = year_month.split("-")
     sharp_file = SHARP_DIR / f"sharp_{year_month}.csv"
 
-    if sharp_file.exists() and sharp_file.stat().st_size > 5_000:
+    if sharp_file.exists() and sharp_file.stat().st_size > 0:
         logger.info("SHARP %s already cached", year_month)
         return sharp_file
 
@@ -631,40 +548,40 @@ def download_month_sharp(year_month: str, args) -> Path:
         else:
             end_dt = datetime(int(year), int(month) + 1, 1)
 
-        # JSOC email: register at http://jsoc.stanford.edu/ajax/register_email.html
-        # then set: export JSOC_EMAIL=your@registered.email
         jsoc_email = os.environ.get("JSOC_EMAIL", "").strip()
         if not jsoc_email:
-            logger.warning(
-                "JSOC_EMAIL not set — SHARP download skipped for %s.\n"
-                "  Register at http://jsoc.stanford.edu/ajax/register_email.html\n"
-                "  Then: export JSOC_EMAIL=your@email.com",
+            logger.info(
+                "JSOC_EMAIL not set — attempting metadata-only SHARP query for %s without export email",
                 year_month
             )
-        else:
-            # JSOC export via drms (Python library)
-            try:
-                import drms
-                c = drms.Client(email=jsoc_email)
-                series = "hmi.sharp_cea_720s"
-                keys = [
-                    "T_REC", "HARPNUM", "LAT_MIN", "LON_MIN", "LAT_MAX", "LON_MAX",
-                    "USFLUX", "MEANGBT", "MEANJZD", "TOTUSJH", "MEANALP",
-                    "MEANGAM", "MEANGBZ", "MEANGBH", "MEANJZH", "TOTUSJZ",
-                    "ABSNJZH", "SAVNCPP", "MEANPOT", "TOTPOT", "MEANSHR",
-                    "SHRGT45", "AREA_ACR", "R_VALUE",
-                ]
-                start_str = start_dt.strftime("%Y.%m.%d_00:00:00_TAI")
-                end_str   = end_dt.strftime("%Y.%m.%d_00:00:00_TAI")
-                q = f"{series}[{start_str}/{(end_dt - start_dt).days}d@12m]"
-                k, _ = c.query(q, key=keys, seg=None)
+
+        # Keyword queries do not require an export request, so they can usually
+        # run without a registered JSOC email. We only pass the email if present.
+        try:
+            import drms
+            client_kwargs = {"email": jsoc_email} if jsoc_email else {}
+            c = drms.Client(**client_kwargs)
+            series = "hmi.sharp_cea_720s"
+            keys = [
+                "T_REC", "HARPNUM", "LAT_MIN", "LON_MIN", "LAT_MAX", "LON_MAX",
+                "USFLUX", "MEANGBT", "MEANJZD", "TOTUSJH", "MEANALP",
+                "MEANGAM", "MEANGBZ", "MEANGBH", "MEANJZH", "TOTUSJZ",
+                "ABSNJZH", "SAVNCPP", "MEANPOT", "TOTPOT", "MEANSHR",
+                "SHRGT45", "AREA_ACR", "R_VALUE",
+            ]
+            start_str = start_dt.strftime("%Y.%m.%d_00:00:00_TAI")
+            q = f"{series}[{start_str}/{(end_dt - start_dt).days}d@12m]"
+            k, _ = c.query(q, key=keys, seg=None)
+            if k is None or len(k) == 0:
+                logger.warning("SHARP %s: JSOC query returned 0 rows", year_month)
+            else:
                 k.to_csv(str(sharp_file), index=False)
                 logger.info("SHARP %s: %d rows saved", year_month, len(k))
-            except ImportError:
-                logger.warning("drms not installed — pip install drms. SHARP skipped for %s.", year_month)
-            except Exception as exc:
-                logger.warning("JSOC SHARP download failed for %s: %s", year_month, exc)
-                logger.warning("  → SHARP is supplementary. Training will continue with zeros for SHARP features.")
+        except ImportError:
+            logger.warning("drms not installed — pip install drms. SHARP skipped for %s.", year_month)
+        except Exception as exc:
+            logger.warning("JSOC SHARP download failed for %s: %s", year_month, exc)
+            logger.warning("  → SHARP is supplementary. Training will continue with zeros for SHARP features.")
 
     except Exception as exc:
         logger.warning("SHARP download error: %s", exc)
@@ -741,19 +658,15 @@ def load_month_features(
     sharp_file: Path,
     year_month: str,
     args,
-) -> Optional[dict]:
+) -> dict[str, Any]:
     """
     Load one month of REAL data from all instruments and build the
     multi-modal feature matrix.
     
-    Returns:
-        X_seq:   (N_windows, WINDOW_S, N_SEQ_FEATURES) — time-series features
-                 N_SEQ_FEATURES = 11 SoLEXS+HEL1OS + 4 wavelet = 15
-        X_sharp: (N_windows, N_SHARP) — SHARP magnetic params (21 features)
-        X_insitu:(N_windows, N_INSITU) — MAG+SWIS in-situ (14 features)
-        y:       (N_windows,) — binary flare labels
-        
-    Returns None if insufficient data found for this month.
+    Returns a dict containing:
+      - load_ok: whether feature engineering succeeded
+      - modality_report: validation-ready per-modality status
+      - arrays used for training when load_ok=True
     """
     year, month = year_month.split("-")
     solexs_dir = month_dir / "solexs"
@@ -761,21 +674,26 @@ def load_month_features(
     mag_dir    = month_dir / "mag"
     swis_dir   = month_dir / "swis"
     suit_dir   = month_dir / "suit"
-    modality_report: dict[str, dict] = {}
 
     WINDOW_S = 1800     # 30 minutes at 1-s cadence
     HORIZON_S = 900     # predict M+ in next 15 minutes
     STEP_S    = 60      # slide window every 60s (saves RAM, reduces redundancy)
+    modality_report = _base_modality_report(month_dir, goes_dir, sharp_file, year_month)
+    result: dict[str, Any] = {
+        "load_ok": False,
+        "year_month": year_month,
+        "month_dir": str(month_dir),
+        "modality_report": modality_report,
+        "errors": [],
+    }
 
     # ── Load SoLEXS (primary) ───────────────────────────────────────────────
     slx_times  = []
     slx_counts = []
     slx_loader = SoLEXSLoader(str(solexs_dir))
 
-    # Scan the configured training window inside the month.
-    start_dt, end_dt = _month_bounds(year, month, args)
-    logger.info("%s training window: %s through %s",
-                year_month, start_dt.date(), (end_dt - timedelta(days=1)).date())
+    # Scan all days in the month
+    start_dt, end_dt, _ = _month_date_range(year_month, quick_test=args.quick_test)
 
     current = start_dt
     while current < end_dt:
@@ -789,26 +707,29 @@ def load_month_features(
             logger.debug("SoLEXS %s error: %s", date_str, exc)
         current += timedelta(days=1)
 
+    modality_report["solexs"]["parsed_samples"] = len(slx_times)
     if len(slx_times) < WINDOW_S * 2:
-        logger.warning("%s: insufficient SoLEXS data (%d samples) — skipping month",
-                       year_month, len(slx_times))
-        return None
+        msg = f"insufficient SoLEXS data ({len(slx_times)} samples)"
+        modality_report["solexs"]["failures"].append(msg)
+        result["errors"].append(msg)
+        _finalize_modality_report(modality_report)
+        logger.warning("%s: %s — skipping month", year_month, msg)
+        return result
 
     slx_times  = np.array(slx_times,  dtype=np.float64)
     slx_counts = np.array(slx_counts, dtype=np.float32)
     idx_sort   = np.argsort(slx_times)
     slx_times  = slx_times[idx_sort]
     slx_counts = slx_counts[idx_sort]
-    logger.info("%s SoLEXS: %d records (%.1f hours)", year_month, len(slx_times), len(slx_times) / 3600)
-    modality_report["solexs"] = _modality_status(
-        "solexs", len(slx_times), _nonzero_fraction(slx_counts), "SoLEXS SDD2 count-rate samples"
+    modality_report["solexs"]["nonzero_fraction"] = _float_ratio(
+        int(np.count_nonzero(slx_counts)), len(slx_counts)
     )
+    logger.info("%s SoLEXS: %d records (%.1f hours)", year_month, len(slx_times), len(slx_times) / 3600)
 
     # ── Load GOES XRS for flare labels (cross-validation) ───────────────────
     # sunpy downloads netCDF (.nc) files — we read them with netCDF4
     goes_flux = None
     goes_times = None
-    goes_file_count = 0
     try:
         import netCDF4 as nc_goes
         # Find all 1-minute average GOES files for this month
@@ -817,7 +738,6 @@ def load_month_features(
             # Try 1-second flux files as fallback
             nc_files = sorted(goes_dir.glob(f"*flx1s*_g18_d{year}{month}*_*.nc"))
         if nc_files:
-            goes_file_count = len(nc_files)
             all_times = []
             all_flux = []
             for ncf in nc_files:
@@ -852,7 +772,6 @@ def load_month_features(
                 goes_flux = np.array(all_flux, dtype=np.float64)
                 # Remove NaN/invalid values
                 valid = np.isfinite(goes_flux) & (goes_flux > 0)
-                valid &= (goes_times >= start_dt.timestamp()) & (goes_times < end_dt.timestamp())
                 goes_times = goes_times[valid]
                 goes_flux = goes_flux[valid]
                 logger.info("%s GOES: %d records from %d nc files", year_month, len(goes_times), len(nc_files))
@@ -862,14 +781,18 @@ def load_month_features(
             logger.warning("%s GOES: no nc files found in %s", year_month, goes_dir)
     except ImportError:
         logger.warning("netCDF4 not installed — GOES data skipped")
+        modality_report["goes"]["failures"].append("netCDF4 not installed")
     except Exception as exc:
         logger.warning("GOES load error: %s", exc)
-    modality_report["goes"] = _modality_status(
-        "goes",
-        0 if goes_times is None else len(goes_times),
-        0.0 if goes_flux is None else _nonzero_fraction(goes_flux),
-        f"{goes_file_count} GOES netCDF files",
-    )
+        modality_report["goes"]["failures"].append(str(exc))
+
+    if goes_times is not None and goes_flux is not None:
+        modality_report["goes"]["parsed_samples"] = len(goes_times)
+        modality_report["goes"]["nonzero_fraction"] = _float_ratio(
+            int(np.count_nonzero(goes_flux > 0)), len(goes_flux)
+        )
+    elif not modality_report["goes"]["failures"]:
+        modality_report["goes"]["failures"].append("no GOES flux parsed")
 
     # ── Load HEL1OS (primary) ────────────────────────────────────────────────
     hel_bands   = {band: [] for band in [
@@ -909,26 +832,27 @@ def load_month_features(
     else:
         hel_aligned = {band: np.zeros_like(slx_counts) for band in hel_bands}
         logger.warning("%s HEL1OS not available — using zeros", year_month)
-    helios_nonzero = max(_nonzero_fraction(arr) for arr in hel_aligned.values())
-    modality_report["helios"] = _modality_status(
-        "helios", len(hel_times), helios_nonzero, "HEL1OS CdTe/CZT hard X-ray bands aligned to SoLEXS"
+        modality_report["helios"]["failures"].append("no HEL1OS records parsed")
+    modality_report["helios"]["parsed_samples"] = len(hel_times)
+    helios_nonzero = np.zeros(len(slx_counts), dtype=np.float32)
+    for arr in hel_aligned.values():
+        helios_nonzero = np.maximum(helios_nonzero, arr.astype(np.float32))
+    modality_report["helios"]["nonzero_fraction"] = _float_ratio(
+        int(np.count_nonzero(helios_nonzero)), len(helios_nonzero)
     )
 
     # ── Load MAG (supplementary — solar wind magnetic field) ─────────────────
     mag_features = np.zeros((len(slx_times), 8), dtype=np.float32)
+    mag_loader   = MAGLoader(str(mag_dir))
+    current = start_dt
     mag_all_records = []
-    if getattr(args, "no_mag", False):
-        logger.info("%s MAG disabled for this run", year_month)
-    else:
-        mag_loader = MAGLoader(str(mag_dir))
-        current = start_dt
-        while current < end_dt:
-            try:
-                recs = mag_loader.load_day(current.strftime("%Y%m%d"))
-                mag_all_records.extend(recs)
-            except Exception:
-                pass
-            current += timedelta(days=1)
+    while current < end_dt:
+        try:
+            recs = mag_loader.load_day(current.strftime("%Y%m%d"))
+            mag_all_records.extend(recs)
+        except Exception:
+            pass
+        current += timedelta(days=1)
 
     if mag_all_records:
         logger.info("%s MAG: %d records", year_month, len(mag_all_records))
@@ -942,8 +866,12 @@ def load_month_features(
                 # Interpolate to full SoLEXS grid (MAG is 10-s cadence)
                 end_i = min(i + 600, len(slx_times))
                 mag_features[i:end_i] = feat[np.newaxis, :]
-    modality_report["mag"] = _modality_status(
-        "mag", len(mag_all_records), _nonzero_fraction(mag_features), "MAG L2 in-situ magnetic features"
+    else:
+        modality_report["mag"]["failures"].append("no MAG records parsed")
+    modality_report["mag"]["parsed_samples"] = len(mag_all_records)
+    modality_report["mag"]["nonzero_fraction"] = _float_ratio(
+        int(np.count_nonzero(np.any(mag_features != 0, axis=1))),
+        len(mag_features),
     )
 
     # ── Load ASPEX-SWIS (supplementary — solar wind particles) ───────────────
@@ -951,16 +879,13 @@ def load_month_features(
     swis_loader   = SWISLoader(str(swis_dir))
     current = start_dt
     swis_all_records = []
-    if getattr(args, "no_swis", False):
-        logger.info("%s SWIS disabled for this run", year_month)
-    else:
-        while current < end_dt:
-            try:
-                recs = swis_loader.load_bulk_params(current.strftime("%Y%m%d"))
-                swis_all_records.extend(recs)
-            except Exception:
-                pass
-            current += timedelta(days=1)
+    while current < end_dt:
+        try:
+            recs = swis_loader.load_bulk_params(current.strftime("%Y%m%d"))
+            swis_all_records.extend(recs)
+        except Exception:
+            pass
+        current += timedelta(days=1)
 
     if swis_all_records:
         logger.info("%s SWIS: %d records", year_month, len(swis_all_records))
@@ -973,8 +898,12 @@ def load_month_features(
             if feat is not None:
                 end_i = min(i + 600, len(slx_times))
                 swis_features[i:end_i] = feat[np.newaxis, :]
-    modality_report["swis"] = _modality_status(
-        "swis", len(swis_all_records), _nonzero_fraction(swis_features), "ASPEX-SWIS L2 bulk solar wind features"
+    else:
+        modality_report["swis"]["failures"].append("no SWIS records parsed")
+    modality_report["swis"]["parsed_samples"] = len(swis_all_records)
+    modality_report["swis"]["nonzero_fraction"] = _float_ratio(
+        int(np.count_nonzero(np.any(swis_features != 0, axis=1))),
+        len(swis_features),
     )
 
     # ── Engineering: SoLEXS derived features ─────────────────────────────────
@@ -1100,9 +1029,7 @@ def load_month_features(
     # SHARP: 21 magnetic complexity params at 12-min cadence
     # We project them onto the per-second SoLEXS time grid
     sharp_feat_full = np.zeros((N, 21), dtype=np.float32)
-    sharp_rows = 0
-    sharp_params = 0
-    if sharp_file.exists() and sharp_file.stat().st_size > 5000:
+    if sharp_file.exists() and sharp_file.stat().st_size > 0:
         try:
             import pandas as pd
             sh = pd.read_csv(str(sharp_file))
@@ -1114,8 +1041,6 @@ def load_month_features(
                 "shrgt45", "area_acr", "r_value",
             ] if c in sh.columns]
             if sharp_cols and len(sh) > 0:
-                sharp_rows = len(sh)
-                sharp_params = len(sharp_cols)
                 t_rec_col = next((c for c in sh.columns if "t_rec" in c or "time" in c), None)
                 if t_rec_col:
                     sh["unix"] = pd.to_datetime(
@@ -1130,40 +1055,45 @@ def load_month_features(
                         )
                     logger.info("%s SHARP: %d rows, %d params loaded",
                                 year_month, len(sh), len(sharp_cols))
+                    modality_report["sharp"]["parsed_samples"] = len(sh)
         except Exception as exc:
             logger.warning("%s SHARP load error: %s", year_month, exc)
-    modality_report["sharp"] = _modality_status(
-        "sharp",
-        sharp_rows,
-        _nonzero_fraction(sharp_feat_full),
-        f"{sharp_params} SHARP magnetic parameters aligned",
+            modality_report["sharp"]["failures"].append(str(exc))
+    else:
+        modality_report["sharp"]["failures"].append("no SHARP file available")
+    modality_report["sharp"]["nonzero_fraction"] = _float_ratio(
+        int(np.count_nonzero(np.any(sharp_feat_full != 0, axis=1))),
+        len(sharp_feat_full),
     )
 
     # ── Load SUIT Images (if available) ──────────────────────────────────────
-    if getattr(args, "no_suit", False):
+    suit_loader = SUITLoader(str(suit_dir))
+    try:
+        suit_images_list = suit_loader.scan_directory()
+        logger.info("%s SUIT: %d images scanned", year_month, len(suit_images_list))
         suit_images_dict = {}
-        logger.info("%s SUIT disabled for this run", year_month)
-    else:
-        suit_loader = SUITLoader(str(suit_dir))
-        try:
-            suit_images_list = suit_loader.scan_directory()
-            logger.info("%s SUIT: %d images scanned", year_month, len(suit_images_list))
-            suit_images_dict = {}
-            for img in suit_images_list:
-                suit_images_dict[img.unix_time] = img.load_array()
-        except Exception as exc:
-            logger.warning("%s SUIT load error: %s", year_month, exc)
-            suit_images_dict = {}
+        for img in suit_images_list:
+            suit_images_dict[img.unix_time] = img.load_array()
+        modality_report["suit"]["parsed_samples"] = len(suit_images_list)
+    except Exception as exc:
+        logger.warning("%s SUIT load error: %s", year_month, exc)
+        modality_report["suit"]["failures"].append(str(exc))
+        suit_images_dict = {}
 
     # Pre-sort SUIT images by timestamp for fast lookup
     suit_times = np.array(sorted(suit_images_dict.keys()), dtype=np.float64) if suit_images_dict else np.array([])
     suit_image_arrays = suit_images_dict
-    suit_nonzero = 0.0
-    if suit_image_arrays:
-        suit_nonzero = max(_nonzero_fraction(np.asarray(arr)) for arr in suit_image_arrays.values())
-    modality_report["suit"] = _modality_status(
-        "suit", len(suit_image_arrays), suit_nonzero, "SUIT UV image arrays loaded"
-    )
+    if len(suit_times) > 0:
+        probe_times = slx_times[::600] if len(slx_times) > 600 else slx_times
+        match_idx = np.searchsorted(suit_times, probe_times, side="right") - 1
+        valid = match_idx >= 0
+        deltas = np.full(len(probe_times), np.inf, dtype=np.float64)
+        deltas[valid] = probe_times[valid] - suit_times[match_idx[valid]]
+        modality_report["suit"]["nonzero_fraction"] = _float_ratio(
+            int(np.count_nonzero(deltas <= 12 * 3600)), len(probe_times)
+        )
+    else:
+        modality_report["suit"]["failures"].append("no SUIT images parsed")
 
     # ── Identify valid window indices (Lazy Dataset prep) ────────────────────
     valid_indices = []
@@ -1179,8 +1109,11 @@ def load_month_features(
         valid_indices.append(i)
 
     if len(valid_indices) < 10:
-        logger.warning("%s: too few windows (%d) — skipping", year_month, len(valid_indices))
-        return None
+        msg = f"too few windows ({len(valid_indices)})"
+        logger.warning("%s: %s — skipping", year_month, msg)
+        result["errors"].append(msg)
+        _finalize_modality_report(modality_report)
+        return result
 
     valid_indices = np.array(valid_indices, dtype=np.int32)
     logger.info(
@@ -1188,37 +1121,9 @@ def load_month_features(
         year_month, len(valid_indices), y_raw[valid_indices].mean() * 100
     )
 
-    month_report = {
-        "month": year_month,
-        "month_dir": str(month_dir),
-        "required_modalities": list(_required_modalities(args)),
-        "start_date": start_dt.date().isoformat(),
-        "end_date": (end_dt - timedelta(days=1)).date().isoformat(),
-        "goes_dir": str(goes_dir),
-        "sharp_file": str(sharp_file),
-        "n_timesteps": int(N),
-        "n_windows": int(len(valid_indices)),
-        "positive_window_rate": round(float(y_raw[valid_indices].mean()), 6),
-        "seq_feature_shape": list(seq_features.shape),
-        "modalities": modality_report,
-    }
-    failed_required = [
-        name for name in _required_modalities(args)
-        if not modality_report.get(name, {}).get("passed", False)
-    ]
-    month_report["failed_required_modalities"] = failed_required
-    _write_month_report(year_month, month_report)
-
-    if getattr(args, "require_all_modalities", False) and failed_required:
-        logger.error(
-            "%s strict validation failed. Missing/zero modalities: %s",
-            year_month,
-            ", ".join(failed_required),
-        )
-        return None
-
-    # Return a dictionary containing the base arrays + valid indices
-    return {
+    _finalize_modality_report(modality_report)
+    result.update({
+        "load_ok": True,
         "seq_features": seq_features,
         "sharp_feat_full": sharp_feat_full,
         "mag_features": mag_features,
@@ -1228,11 +1133,8 @@ def load_month_features(
         "slx_times": slx_times,
         "y_raw": y_raw,
         "valid_indices": valid_indices,
-        "month_report": month_report,
-        "use_sharp": not getattr(args, "no_sharp", False),
-        "use_suit": not getattr(args, "no_suit", False),
-        "use_gnn": not getattr(args, "no_sharp", False),
-    }
+    })
+    return result
 
 
 def _align_to_grid(
@@ -1431,9 +1333,9 @@ class FlareDataset(Dataset):
                 t_img = self.suit_times[valid_idx]
                 if current_time - t_img < 12 * 3600:
                     if t_img not in self.suit_cache:
-                        import cv2
+                        from skimage.transform import resize as sk_resize
                         raw_img = self.suit_image_arrays[t_img]
-                        resized = cv2.resize(raw_img, (224, 224), interpolation=cv2.INTER_AREA)
+                        resized = sk_resize(raw_img, (224, 224), anti_aliasing=True).astype(np.float32)
                         resized = np.clip(resized, 0, np.percentile(resized, 99.9))
                         if resized.max() > 0:
                             resized = resized / resized.max()
@@ -1555,16 +1457,10 @@ def train_one_month(
             y_b  = y_b.to(device)
             # Image branch enabled: usage logic here
             batch_size = X_s.size(0)
-            gnn_edge_index = torch.arange(batch_size, device=device).unsqueeze(0).repeat(2, 1)
-            gnn_batch = torch.arange(batch_size, device=device)
+            gnn_edge_index, gnn_batch = _self_loop_gnn_inputs(batch_size, device)
 
             optimizer.zero_grad()
-            sharp_arg = X_sh if ds_info.get("use_sharp", True) else None
-            image_arg = X_su if ds_info.get("use_suit", True) else None
-            gnn_ei_arg = gnn_edge_index if ds_info.get("use_gnn", True) else None
-            gnn_bt_arg = gnn_batch if ds_info.get("use_gnn", True) else None
-            out = model(X_s, sharp_arg, X_i, image=image_arg,
-                        gnn_edge_index=gnn_ei_arg, gnn_batch=gnn_bt_arg)
+            out = model(X_s, X_sh, X_i, image=X_su, gnn_edge_index=gnn_edge_index, gnn_batch=gnn_batch)
 
             # Primary: 15-min horizon
             loss = criterion(out["p_flare_15min"], y_b)
@@ -1594,16 +1490,10 @@ def train_one_month(
         with torch.no_grad():
             for X_s, X_sh, X_i, X_su, y_b in val_loader:
                 batch_size = X_s.size(0)
-                gnn_edge_index = torch.arange(batch_size, device=device).unsqueeze(0).repeat(2, 1)
-                gnn_batch = torch.arange(batch_size, device=device)
-                sharp_arg = X_sh.to(device) if ds_info.get("use_sharp", True) else None
-                image_arg = X_su.to(device) if ds_info.get("use_suit", True) else None
-                gnn_ei_arg = gnn_edge_index if ds_info.get("use_gnn", True) else None
-                gnn_bt_arg = gnn_batch if ds_info.get("use_gnn", True) else None
-                out = model(X_s.to(device), sharp_arg, X_i.to(device), image=image_arg,
-                            gnn_edge_index=gnn_ei_arg, gnn_batch=gnn_bt_arg)
-                p = out["p_flare_15min"].cpu().numpy()  # already sigmoid'd by ForecastHead
-                val_probs.extend(p.tolist() if p.ndim > 0 else [float(p)])
+                gnn_edge_index, gnn_batch = _self_loop_gnn_inputs(batch_size, device)
+                out = model(X_s.to(device), X_sh.to(device), X_i.to(device), image=X_su.to(device), gnn_edge_index=gnn_edge_index, gnn_batch=gnn_batch)
+                p = out["p_flare_15min"].cpu().numpy().ravel()  # already sigmoid'd by ForecastHead
+                val_probs.extend(p.tolist())
                 val_labels.extend(y_b.numpy().tolist())
 
         vp = np.array(val_probs)
@@ -1639,51 +1529,6 @@ def train_one_month(
                              "threshold": round(best_t, 2)}
 
     return month_metrics
-
-
-def collect_conformal_scores(
-    model: AdityScanModel,
-    ds_info: dict,
-    device: torch.device,
-    year_month: str,
-    batch_size: int = 64,
-) -> list[float]:
-    """Collect held-out calibration scores before month data is deleted."""
-    valid_idx = ds_info["valid_indices"]
-    cal_start = int(0.9 * len(valid_idx))
-    cal_indices = valid_idx[cal_start:]
-    if len(cal_indices) < 5:
-        logger.warning("%s conformal calibration skipped: only %d calibration windows",
-                       year_month, len(cal_indices))
-        return []
-
-    cal_ds = FlareDataset(ds_info, cal_indices)
-    cal_loader = DataLoader(cal_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-    scores: list[float] = []
-    model.eval()
-    with torch.no_grad():
-        for X_s, X_sh, X_i, X_su, y_b in cal_loader:
-            batch_size_c = X_s.size(0)
-            gnn_ei = torch.arange(batch_size_c, device=device).unsqueeze(0).repeat(2, 1)
-            gnn_bt = torch.arange(batch_size_c, device=device)
-            sharp_arg = X_sh.to(device) if ds_info.get("use_sharp", True) else None
-            image_arg = X_su.to(device) if ds_info.get("use_suit", True) else None
-            gnn_ei_arg = gnn_ei if ds_info.get("use_gnn", True) else None
-            gnn_bt_arg = gnn_bt if ds_info.get("use_gnn", True) else None
-            out = model(
-                X_s.to(device),
-                sharp_arg,
-                X_i.to(device),
-                image=image_arg,
-                gnn_edge_index=gnn_ei_arg,
-                gnn_batch=gnn_bt_arg,
-            )
-            p_hat = out["p_flare_15min"].cpu().numpy().ravel()
-            y_cal = y_b.numpy().ravel()
-            scores.extend(np.abs(y_cal - p_hat).tolist())
-
-    logger.info("%s conformal calibration scores collected: %d", year_month, len(scores))
-    return scores
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1729,8 +1574,6 @@ def main():
     )
     parser.add_argument("--months", type=str, default="",
                         help="Comma-separated YYYY-MM months to train (default: all 15 months)")
-    parser.add_argument("--training-manifest", type=str, default="",
-                        help="JSON file with per-month date windows, roles, and weights")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from last checkpoint")
     parser.add_argument("--skip-download", action="store_true",
@@ -1739,45 +1582,24 @@ def main():
                         help="Quick test: 3 days of data, 2 epochs only")
     parser.add_argument("--no-suit", action="store_true",
                         help="Skip SUIT image branch")
-    parser.add_argument("--no-sharp", action="store_true",
-                        help="Skip SHARP LSTM/GNN branches")
-    parser.add_argument("--no-mag", action="store_true",
-                        help="Skip MAG loading; in-situ branch uses zero-padded MAG slots")
-    parser.add_argument("--no-swis", action="store_true",
-                        help="Skip SWIS bulk loading; in-situ branch uses MAG plus zero-padded SWIS slots")
-    parser.add_argument("--start-date", type=str, default="",
-                        help="Inclusive YYYY-MM-DD start date inside selected month")
-    parser.add_argument("--end-date", type=str, default="",
-                        help="Inclusive YYYY-MM-DD end date inside selected month")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="Validate month inputs and emit a report without training")
+    parser.add_argument("--require-all-modalities", action="store_true",
+                        help="Fail if any modality is missing or aligns to all-zero features")
     parser.add_argument("--delete-after-month", action="store_true", default=True,
                         help="Delete downloaded month data after training (saves disk space)")
     parser.add_argument("--keep-data", action="store_true",
                         help="Keep downloaded data (don't delete after training)")
-    parser.add_argument("--keep-goes-data", action="store_true",
-                        help="Keep GOES files after each month even when PRADAN month data is deleted")
-    parser.add_argument("--validate-only", action="store_true",
-                        help="Run ingestion/alignment validation and reports without training")
-    parser.add_argument("--require-all-modalities", action="store_true",
-                        help="Fail if any --required-modalities entry is absent/zero after alignment")
-    parser.add_argument("--required-modalities", type=str,
-                        default=",".join(DEFAULT_REQUIRED_MODALITIES),
-                        help="Comma-separated modalities required for strict validation")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--require-gpu", action="store_true",
-                        help="Refuse to train unless CUDA or Apple Metal/MPS is available")
     parser.add_argument("--epochs-per-month", type=int, default=10,
                         help="Epochs to train on each month's data")
-    parser.add_argument("--max-train-windows", type=int, default=0,
-                        help="Limit valid windows after full validation; useful for CPU smoke training")
     args = parser.parse_args()
-    args.month_windows = _manifest_windows(args.training_manifest)
 
     if args.quick_test:
         args.epochs_per_month = 2
         logger.info("⚡ QUICK TEST MODE")
-    if args.validate_only:
-        args.keep_data = True
-        logger.info("VALIDATE-ONLY MODE: training/export will not run")
+    if args.require_all_modalities and args.no_suit:
+        raise SystemExit("--require-all-modalities conflicts with --no-suit")
 
     logger.info("=" * 70)
     logger.info("AdityScan v4 — REAL Incremental Multi-Modal Training")
@@ -1790,9 +1612,7 @@ def main():
     logger.info("")
 
     # Which months to train
-    if args.training_manifest:
-        months_to_train = _load_training_manifest(args.training_manifest)
-    elif args.months:
+    if args.months:
         months_to_train = [(m.strip(), f"user-specified", 1.5)
                            for m in args.months.split(",")]
     elif args.quick_test:
@@ -1804,14 +1624,12 @@ def main():
     for ym, desc, w in months_to_train:
         logger.info("  %s  [weight=%.1f]  %s", ym, w, desc)
 
-    device = get_device(require_gpu=args.require_gpu)
+    device = get_device()
 
     # ── Initialize model ──────────────────────────────────────────────────────
     model = AdityScanModel(mc_dropout=0.1)
     if not args.no_suit:
         model.enable_image_branch()
-    else:
-        logger.info("SUIT image branch disabled")
     model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -1822,7 +1640,7 @@ def main():
 
     # Resume from checkpoint
     if args.resume and Path(CKPT_PATH).exists():
-        ckpt = torch.load(CKPT_PATH, map_location="cpu", weights_only=False)
+        ckpt = torch.load(CKPT_PATH, map_location="cpu", weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
         logger.info("Resumed from checkpoint: TSS=%.3f (after %s)",
                     ckpt.get("best_tss", 0.0), ckpt.get("last_month", "?"))
@@ -1830,14 +1648,12 @@ def main():
     # Optimizer: differential learning rates per branch
     optimizer = optim.AdamW([
         {"params": model.xray_branch.parameters(),   "lr": 3e-4},  # PRIMARY
-        {"params": model.insitu_branch.parameters(), "lr": 3e-4},  # MAG context
+        {"params": model.sharp_branch.parameters(),  "lr": 2e-4},  # SUPPLEMENTARY
+        {"params": model.insitu_branch.parameters(), "lr": 3e-4},  # SUPPLEMENTARY
         {"params": model.fusion.parameters(),        "lr": 3e-4},  # FUSION
         {"params": model.nowcast_head.parameters(),  "lr": 3e-4},  # HEAD
         {"params": model.forecast_head.parameters(), "lr": 3e-4},  # HEAD
     ], weight_decay=1e-4)
-
-    if not args.no_sharp:
-        optimizer.add_param_group({"params": model.sharp_branch.parameters(), "lr": 2e-4})
 
     if model.image_branch is not None:
         optimizer.add_param_group({"params": model.image_branch.parameters(), "lr": 1e-4})
@@ -1850,8 +1666,9 @@ def main():
 
     # ── MAIN INCREMENTAL LOOP ─────────────────────────────────────────────────
     all_metrics = []
+    month_reports: dict[str, dict[str, Any]] = {}
     global_best_tss = 0.0
-    conformal_scores: list[float] = []
+    calibration_cache: dict[str, dict[str, Any]] = {}
 
     for month_idx, (year_month, description, flare_weight) in enumerate(months_to_train):
         logger.info("")
@@ -1864,45 +1681,39 @@ def main():
         if not args.skip_download:
             downloaded = download_month_pradan(year_month, args)
             goes_dir   = download_month_goes(year_month, args)
-            sharp_file = SHARP_DIR / f"sharp_{year_month}.csv"
-            if not args.no_sharp:
-                sharp_file = download_month_sharp(year_month, args)
+            sharp_file = download_month_sharp(year_month, args)
         else:
             downloaded = {
                 "solexs": CACHE_DIR / year_month / "solexs",
                 "helios": CACHE_DIR / year_month / "helios",
                 "mag":    CACHE_DIR / year_month / "mag",
                 "swis":   CACHE_DIR / year_month / "swis",
+                "suit":   CACHE_DIR / year_month / "suit",
             }
-            goes_dir   = download_month_goes(year_month, args)
+            goes_dir   = GOES_DIR
             sharp_file = SHARP_DIR / f"sharp_{year_month}.csv"
 
         month_dir = CACHE_DIR / year_month
 
         # ── LOAD & ENGINEER FEATURES ──────────────────────────────────────────
-        result = load_month_features(
-            month_dir, goes_dir, sharp_file, year_month, args
-        )
+        result = load_month_features(month_dir, goes_dir, sharp_file, year_month, args)
+        month_payload = _build_month_report_payload(year_month, result, args)
+        report_path = _write_month_report(year_month, "validation", month_payload)
+        month_reports[year_month] = month_payload
+        logger.info("Month report written: %s", report_path)
 
-        if result is None:
-            logger.warning("No usable data for %s — skipping", year_month)
-            if args.require_all_modalities:
-                raise SystemExit(f"{year_month} failed strict modality validation")
-            if not args.keep_data and not args.validate_only:
-                _safe_delete(month_dir)
-            continue
+        if args.require_all_modalities:
+            _enforce_required_modalities(year_month, result["modality_report"])
 
         if args.validate_only:
-            report = result.get("month_report", {})
-            failed = report.get("failed_required_modalities", [])
-            if failed and args.require_all_modalities:
-                raise SystemExit(f"{year_month} failed strict modality validation: {', '.join(failed)}")
-            logger.info("%s validation passed (%d windows)", year_month, len(result["valid_indices"]))
-            del result
-            gc.collect()
+            logger.info("%s validation complete (load_ok=%s)", year_month, result.get("load_ok"))
             continue
 
-        _limit_training_windows(result, args, year_month)
+        if not result.get("load_ok"):
+            logger.warning("No usable data for %s — skipping", year_month)
+            if not args.keep_data:
+                _safe_delete(month_dir)
+            continue
 
         # ── TRAIN on this month ────────────────────────────────────────────────
         month_metrics = train_one_month(
@@ -1918,15 +1729,6 @@ def main():
 
         if month_metrics:
             all_metrics.append(month_metrics)
-            conformal_scores.extend(
-                collect_conformal_scores(
-                    model,
-                    result,
-                    device=device,
-                    year_month=year_month,
-                    batch_size=max(32, args.batch_size * 2),
-                )
-            )
             tss = month_metrics.get("TSS", 0.0)
             logger.info("Month %s complete: TSS=%.3f HSS=%.3f POD=%.2f FAR=%.2f",
                         year_month, tss,
@@ -1937,6 +1739,9 @@ def main():
             if tss > global_best_tss:
                 global_best_tss = tss
 
+        if len(months_to_train) == 1:
+            calibration_cache[year_month] = result
+
         # ── SAVE CHECKPOINT after every month ────────────────────────────────
         torch.save({
             "model_state_dict": model.state_dict(),
@@ -1944,7 +1749,13 @@ def main():
             "last_month": year_month,
             "best_tss": global_best_tss,
             "all_metrics": all_metrics,
-            "architecture": _architecture_metadata(args),
+            "architecture": {
+                "branches": ["SoLEXS+HEL1OS TCN (20 features + CWT wavelet)",
+                             "SHARP BiLSTM (21 SHARP magnetic params)",
+                             "MAG+SWIS InSitu MLP (14 in-situ features)"],
+                "fusion": "Cross-Modal Attention (4-head, 256-dim)",
+                "calibration": "Temperature Scaling (learnable)",
+            },
         }, CKPT_PATH)
         logger.info("Checkpoint saved: %s (best TSS=%.3f)", CKPT_PATH, global_best_tss)
 
@@ -1954,14 +1765,12 @@ def main():
         if device.type == "mps":
             torch.mps.empty_cache()
 
-        if not args.keep_data:
+        if not args.keep_data and len(months_to_train) > 1:
             _safe_delete(month_dir)
             logger.info("Deleted %s raw data to free disk space", year_month)
-            if not args.keep_goes_data:
-                _safe_delete_goes_month(year_month)
 
     if args.validate_only:
-        logger.info("Validation-only complete. Reports are in %s", MODELS_DIR / "month_reports")
+        logger.info("Validation-only run complete.")
         return
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1982,8 +1791,40 @@ def main():
     #   [P_hat - q_0.90, P_hat + q_0.90]
     # No distributional assumptions — just exchangeability (holds if we retrain).
     logger.info("Computing conformal prediction calibration (q_0.90)...")
-    logger.info("Using %d in-memory calibration scores collected before month cleanup",
-                len(conformal_scores))
+    conformal_scores = []
+    model.eval()
+    for month_idx_c, (year_month_c, _, _) in enumerate(months_to_train):
+        result_c = calibration_cache.get(year_month_c)
+        if result_c is None:
+            month_dir_c = CACHE_DIR / year_month_c
+            if not month_dir_c.exists():
+                continue
+            sharp_file_c = SHARP_DIR / f"sharp_{year_month_c}.csv"
+            result_c = load_month_features(month_dir_c, GOES_DIR, sharp_file_c, year_month_c, args)
+        if not result_c.get("load_ok"):
+            continue
+        # Use last 10% of valid indices as conformal calibration set
+        valid_idx_c = result_c["valid_indices"]
+        cal_start = int(0.9 * len(valid_idx_c))
+        cal_indices = valid_idx_c[cal_start:]
+        if len(cal_indices) < 5:
+            del result_c
+            gc.collect()
+            continue
+        cal_ds = FlareDataset(result_c, cal_indices)
+        cal_loader = DataLoader(cal_ds, batch_size=64, shuffle=False, num_workers=0)
+        with torch.no_grad():
+            for X_s, X_sh, X_i, X_su, y_b in cal_loader:
+                batch_size_c = X_s.size(0)
+                gnn_ei, gnn_bt = _self_loop_gnn_inputs(batch_size_c, device)
+                out = model(X_s.to(device), X_sh.to(device), X_i.to(device),
+                           image=X_su.to(device), gnn_edge_index=gnn_ei, gnn_batch=gnn_bt)
+                p_hat = out["p_flare_15min"].cpu().numpy().ravel()  # already sigmoid'd
+                y_cal = y_b.numpy().ravel()
+                scores = np.abs(y_cal - p_hat)
+                conformal_scores.extend(scores.tolist())
+        del result_c
+        gc.collect()
 
     if conformal_scores:
         q_90 = float(np.percentile(conformal_scores, 90))
@@ -1996,17 +1837,9 @@ def main():
         q_90, q_95 = 0.25, 0.35
         logger.warning("No conformal calibration data — using conservative defaults")
 
-    # Export ONNX. Some PyTorch builds require onnxscript in addition to onnx;
-    # keep report generation non-fatal if that optional exporter dep is absent.
+    # Export ONNX
     onnx_path = str(MODELS_DIR / "adityscan_v4.onnx")
-    onnx_exported = False
-    onnx_error = ""
-    try:
-        export_onnx(model, onnx_path)
-        onnx_exported = True
-    except Exception as exc:
-        onnx_error = str(exc)
-        logger.warning("ONNX export skipped: %s", onnx_error)
+    export_onnx(model, onnx_path)
 
     # Save training report
     report = {
@@ -2025,18 +1858,15 @@ def main():
         },
         "architecture": {
             "type": "AdityScanSOTA_v4.1",
-            "experiment": _architecture_metadata(args)["experiment"],
             "primary_branch": "SoLEXS+HEL1OS Causal-TCN, 6 layers dilation=[1,2,4,8,16,32], 256-dim",
-            "secondary_branch": "Disabled when --no-sharp is set; planned SHARP BiLSTM/GNN future scope",
-            "insitu_branch": "MAG InSitu-MLP with SWIS feature slots zero-padded when --no-swis is set",
-            "image_branch": "Disabled when --no-suit is set; planned SUIT UV image CNN future scope",
-            "fusion": "Cross-Modal Attention 4-head 256-dim (X-ray as primary query; missing branches zero-context)",
+            "secondary_branch": "SHARP BiLSTM + Self-Attention, 3-layer bidirectional, 128-dim",
+            "insitu_branch": "MAG+SWIS InSitu-MLP, 3-layer GELU, 64-dim",
+            "fusion": "Cross-Modal Attention 4-head 256-dim (X-ray as primary query)",
             "n_seq_features": 22,
             "n_sharp_features": 21,
             "n_insitu_features": 14,
             "window_seconds": 1800,
             "wavelet_transform": "PyWavelets cmor1.5-1.0 (Morlet), 8 scales 1-128s",
-            "current_run": _architecture_metadata(args),
         },
         "physics_features": {
             "hxr_spectral_index": "HEL1OS CdTe3/CZT2 power-law index γ (non-thermal: γ<4.5)",
@@ -2048,14 +1878,17 @@ def main():
             "primary": ["Aditya-L1 SoLEXS L1 (1-s ZIP archives from PRADAN)",
                         "Aditya-L1 HEL1OS L1 (1-s CdTe+CZT from PRADAN)"],
             "supplementary": ["Aditya-L1 MAG L2 (10-s Bx/By/Bz GSE)",
+                              "Aditya-L1 ASPEX-SWIS L2 (proton density/T/v)",
+                              "SDO/HMI SHARP CEA 720s (21 magnetic params)",
                               "GOES-18 XRS 1-min (flare labels)"],
-            "future_scope": _architecture_metadata(args)["future_scope_data_sources"],
             "derived": ["CWT QPP spectrogram", "Neupert integral", "HXR/SXR ratio",
                         "HXR spectral index γ", "Alfvén Mach number M_A",
                         "IMF clock/cone angles"],
         },
-        "onnx_path": onnx_path if onnx_exported else None,
-        "onnx_export_error": onnx_error,
+        "modality_usage": {
+            year_month: payload["modality_report"] for year_month, payload in month_reports.items()
+        },
+        "onnx_path": onnx_path,
     }
     report_path = str(MODELS_DIR / "training_report.json")
     with open(report_path, "w") as f:
@@ -2068,10 +1901,7 @@ def main():
     logger.info("")
     logger.info("  Global Best TSS:  %.3f", global_best_tss)
     logger.info("  Months trained:   %d", len([m for m in all_metrics if "month" in m]))
-    if onnx_exported:
-        logger.info("  ONNX model:       %s", onnx_path)
-    else:
-        logger.info("  ONNX model:       skipped (%s)", onnx_error)
+    logger.info("  ONNX model:       %s", onnx_path)
     logger.info("  Training report:  %s", report_path)
     logger.info("")
     logger.info("NEXT STEPS:")
@@ -2090,28 +1920,6 @@ def _safe_delete(path: Path) -> None:
             logger.debug("Deleted: %s", path)
     except Exception as exc:
         logger.warning("Could not delete %s: %s", path, exc)
-
-
-def _safe_delete_goes_month(year_month: str) -> None:
-    """Delete cached GOES files for a completed month."""
-    year, month = year_month.split("-")
-    patterns = [
-        f"*avg1m*_g18_d{year}{month}*_*.nc",
-        f"*flx1s*_g18_d{year}{month}*_*.nc",
-    ]
-    deleted = 0
-    freed = 0
-    for pattern in patterns:
-        for path in GOES_DIR.glob(pattern):
-            try:
-                freed += path.stat().st_size
-                path.unlink()
-                deleted += 1
-            except Exception as exc:
-                logger.warning("Could not delete GOES file %s: %s", path, exc)
-    if deleted:
-        logger.info("Deleted %d GOES files for %s (%.1f MB freed)",
-                    deleted, year_month, freed / 1e6)
 
 
 if __name__ == "__main__":
