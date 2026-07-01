@@ -221,12 +221,12 @@ AdityScan implements a **three-layer uncertainty stack**:
 │  MATHEMATICAL coverage guarantee (not empirical)        │
 ├─────────────────────────────────────────────────────────┤
 │  Layer 2 — TEMPERATURE SCALING                          │
-│  Learned T = 0.863 · ECE drops below 3%                │
+│  Learned T = 0.863 · ECE drops below 3%                 │
 │  One parameter, trained on held-out validation set      │
 ├─────────────────────────────────────────────────────────┤
 │  Layer 1 — MC DROPOUT (Epistemic Uncertainty)           │
-│  T = 50 stochastic passes · σ = spread of predictions  │
-│  High σ → limited data → operator should verify        │
+│  T = 50 stochastic passes · σ = spread of predictions   │
+│  High σ → limited data → operator should verify         │
 └─────────────────────────────────────────────────────────┘
 ```
 
