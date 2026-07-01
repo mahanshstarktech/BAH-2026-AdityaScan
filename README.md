@@ -29,7 +29,7 @@
 
 <br/>
 
-🌐 **[Live Dashboard](https://adityscan.pages.dev)** &nbsp;|&nbsp; 📦 **[GitHub Repo](https://github.com/mahanshstarktech/BAH-2026-AdityaScan)** &nbsp;|&nbsp; 📄 **[Technical Report](docs/AdityScan_Technical_Report.html)**
+🌐 **[Live Dashboard](https://aditya-scan.lsoni6870.workers.dev)** &nbsp;|&nbsp; 📦 **[GitHub Repo](https://github.com/mahanshstarktech/BAH-2026-AdityaScan)** &nbsp;|&nbsp; 📄 **[Technical Report](https://mahanshstarktech.github.io/BAH-2026-AdityaScan/)**
 
 </div>
 
